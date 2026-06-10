@@ -1182,9 +1182,23 @@ Hormat saya,
                     
                     try:
                         status_area.info("Menghubungkan ke SMTP Server Gmail...")
-                        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)
-                        server.starttls()
-                        status_area.info("Melakukan Autentikasi...")
+                        server = None
+                        connected_port = None
+                        
+                        try:
+                            status_area.info("Menghubungkan via Port 587 (TLS)...")
+                            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+                            server.starttls()
+                            connected_port = 587
+                        except Exception as tls_err:
+                            status_area.info("Gagal terhubung via Port 587. Mencoba Port 465 (SSL)...")
+                            try:
+                                server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10)
+                                connected_port = 465
+                            except Exception as ssl_err:
+                                raise Exception(f"Kedua port SMTP (587 & 465) diblokir oleh provider internet/ISP Anda atau koneksi tidak stabil.\nDetail TLS (587): {tls_err}\nDetail SSL (465): {ssl_err}")
+                                
+                        status_area.info(f"Terhubung via Port {connected_port}. Melakukan Autentikasi...")
                         server.login(sender_email, app_password)
                         
                         for i, (_, row) in enumerate(selected_journals.iterrows()):
