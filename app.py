@@ -1,21 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-SintaJournal-Scraper & Email Sender
-A Streamlit web application to scrape Sinta journals and send mass emails using SMTP Gmail.
+SintaJournal-Scraper & Mailer
+A Streamlit web application to scrape Sinta journals, extract contacts, APC submission fees, and send mass emails using SMTP Gmail.
 
 Cara Menjalankan:
-1. Pastikan library terinstall (sudah diinstall di venv):
-   pip install requests beautifulsoup4 streamlit python-dotenv
+1. Pastikan library terinstall:
+   pip install requests beautifulsoup4 streamlit python-dotenv pandas
 2. Jalankan Streamlit:
    streamlit run app.py
-   (Atau jika menggunakan venv: .venv\\Scripts\\streamlit run app.py)
-
-Cara Mendapatkan App Password Gmail:
-1. Buka Akun Google Anda (https://myaccount.google.com/).
-2. Aktifkan "Verifikasi 2 Langkah" (2-Step Verification) di menu Keamanan (Security).
-3. Cari "Sandi Aplikasi" (App Passwords) di kolom pencarian atau di bagian bawah menu Keamanan.
-4. Buat sandi baru (pilih nama bebas, misal "Sinta Scraper").
-5. Google akan memberikan 16 digit kode rahasia. Salin kode tersebut (tanpa spasi) ke input password di aplikasi ini atau ke file .env.
 """
 
 import streamlit as st
@@ -30,6 +22,7 @@ from email.mime.text import MIMEText
 import pandas as pd
 import time
 import os
+import urllib.parse
 from dotenv import load_dotenv, set_key
 
 # Disable SSL verification warnings
@@ -59,26 +52,26 @@ st.markdown("""
     
     /* Header Gradient styling */
     .header-container {
-        background: linear-gradient(135deg, #6366F1 0%, #06B6D4 100%);
+        background: linear-gradient(135deg, #4F46E5 0%, #06B6D4 100%);
         padding: 2.5rem;
         border-radius: 20px;
         color: white;
         margin-bottom: 2rem;
-        box-shadow: 0 10px 25px -5px rgba(99, 102, 241, 0.3), 0 8px 10px -6px rgba(6, 182, 212, 0.3);
+        box-shadow: 0 10px 25px -5px rgba(79, 70, 229, 0.3), 0 8px 10px -6px rgba(6, 182, 212, 0.3);
         border: 1px solid rgba(255, 255, 255, 0.1);
         text-align: center;
     }
     
     .header-title {
-        font-size: 2.8rem;
+        font-size: 2.6rem;
         font-weight: 800;
         margin: 0;
-        letter-spacing: -0.05em;
+        letter-spacing: -0.04em;
         text-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     
     .header-subtitle {
-        font-size: 1.15rem;
+        font-size: 1.1rem;
         font-weight: 400;
         opacity: 0.95;
         margin-top: 0.75rem;
@@ -86,7 +79,7 @@ st.markdown("""
     
     /* Card Container */
     .card-container {
-        background: rgba(255, 255, 255, 0.6);
+        background: rgba(255, 255, 255, 0.7);
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         border: 1px solid rgba(229, 231, 235, 0.8);
@@ -129,17 +122,17 @@ st.markdown("""
         background: linear-gradient(135deg, #4F46E5 0%, #06B6D4 100%);
         color: white;
         border: none;
-        padding: 0.65rem 2rem;
+        padding: 0.6rem 1.5rem;
         font-weight: 600;
         border-radius: 10px;
         transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+        box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
         width: 100%;
     }
     
     div.stButton > button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 12px 20px rgba(79, 70, 229, 0.4);
+        box-shadow: 0 8px 18px rgba(79, 70, 229, 0.35);
         background: linear-gradient(135deg, #4338CA 0%, #0891B2 100%);
         color: white;
     }
@@ -154,14 +147,6 @@ st.markdown("""
     .stTextInput input:focus, .stTextArea textarea:focus, .stSelectbox select:focus {
         border-color: #6366F1 !important;
         box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important;
-    }
-    
-    /* Status Labels */
-    .status-badge {
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-size: 0.8rem;
-        font-weight: 600;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -193,7 +178,7 @@ def extract_emails(html_text):
     email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     raw_emails = re.findall(email_pattern, html_text)
     for email in raw_emails:
-        if not email.endswith(('.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.png', '.svg', '.webp', '.pdf', '.docx')):
+        if not email.endswith(('.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.svg', '.webp', '.pdf', '.docx')):
             valid_emails.add(email.lower())
             
     return list(valid_emails)
@@ -258,7 +243,6 @@ def extract_scope(soup, text_content):
     for keyword in scope_headers:
         elements = soup.find_all(lambda tag: tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div'] and tag.text and keyword in tag.text.lower())
         for el in elements:
-            # Find next sibling paragraphs
             siblings = el.find_next_siblings(['p', 'div', 'ul'])
             scope_text = ""
             for sib in siblings[:3]:
@@ -286,6 +270,94 @@ def extract_scope(soup, text_content):
                 return snippet
                 
     return "Skope / Bidang fokus tidak terdeteksi otomatis."
+
+# Helper to extract Publication / Submission Fee (APC)
+def extract_fee(soup, html_text, journal_url, headers):
+    fee_keywords = [
+        "author fee", "author fees", "biaya penulisan", "biaya publikasi", 
+        "publication fee", "submission fee", "article processing charge", 
+        "apc", "biaya submit", "biaya pemrosesan", "processing fee", "biaya artikel"
+    ]
+    
+    # 1. Search in main page elements
+    for kw in fee_keywords:
+        elements = soup.find_all(lambda tag: tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'td', 'li'] and tag.text and kw in tag.text.lower())
+        for el in elements:
+            parent = el.parent if el.name in ['h1','h2','h3','h4','h5','h6'] else el
+            txt = parent.get_text().strip()
+            match = re.search(r'(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+|(?:free of charge|tidak dipungut biaya|tanpa biaya|no publication fee|gratis|0\s?(?:idr|usd|rp)|rp\.?\s?0)', txt, re.I)
+            if match:
+                clean_txt = re.sub(r'\s+', ' ', txt)
+                if len(clean_txt) > 150:
+                    clean_txt = clean_txt[:147] + "..."
+                return clean_txt
+
+    # 2. Pattern matching in main raw text
+    fee_match = re.search(r'(?:biaya|fee|apc|publikasi|penulisan|submission)[^\.\n]{0,60}(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+|(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+[^\.\n]{0,60}(?:biaya|fee|publikasi|artikel|page)', html_text, re.I)
+    if fee_match:
+        clean_match = re.sub(r'\s+', ' ', fee_match.group(0)).strip()
+        if len(clean_match) > 120:
+            clean_match = clean_match[:117] + "..."
+        return clean_match
+
+    free_match = re.search(r'(?:free of charge|tidak dipungut biaya|tanpa biaya|no publication fee|0\s?(?:idr|usd|rp)|rp\.?\s?0)', html_text, re.I)
+    if free_match:
+        return "Gratis / Free"
+
+    # 3. Check fee subpages
+    base_url = journal_url.rstrip('/')
+    fee_urls = [
+        f"{base_url}/about/submissions",
+        f"{base_url}/about/editorialPolicies",
+        f"{base_url}/about/fees",
+    ]
+    if "index.php" in base_url.lower():
+        fee_urls.extend([
+            f"{base_url}/about/submissions#authorFees",
+            f"{base_url}/about/editorialPolicies#authorFees",
+        ])
+
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        href_lower = href.lower()
+        if any(k in href_lower for k in ['fee', 'author', 'submission', 'biaya', 'charge']):
+            if not href.startswith(('http://', 'https://')):
+                from urllib.parse import urljoin
+                href = urljoin(journal_url, href)
+            fee_urls.append(href)
+
+    seen_fee_urls = set()
+    unique_fee_urls = [x for x in fee_urls if not (x in seen_fee_urls or seen_fee_urls.add(x))]
+    
+    for f_url in unique_fee_urls[:2]:
+        try:
+            f_res = requests.get(f_url, headers=headers, timeout=6, verify=False)
+            if f_res.status_code == 200:
+                f_html = html.unescape(f_res.text)
+                f_soup = BeautifulSoup(f_html, 'html.parser')
+                f_text = f_soup.get_text()
+                
+                fee_elem = f_soup.find(id=re.compile(r'authorFees|fee|biaya', re.I)) or f_soup.find(class_=re.compile(r'authorFees|fee|biaya', re.I))
+                if fee_elem:
+                    t = re.sub(r'\s+', ' ', fee_elem.get_text()).strip()
+                    if len(t) > 10:
+                        if len(t) > 150:
+                            t = t[:147] + "..."
+                        return t
+                
+                m = re.search(r'(?:biaya|fee|apc|publikasi|penulisan|submission)[^\.\n]{0,60}(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+|(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+[^\.\n]{0,60}(?:biaya|fee|publikasi|artikel|page)', f_text, re.I)
+                if m:
+                    clean_m = re.sub(r'\s+', ' ', m.group(0)).strip()
+                    if len(clean_m) > 120:
+                        clean_m = clean_m[:117] + "..."
+                    return clean_m
+                    
+                if any(k in f_text.lower() for k in ['free of charge', 'tidak dipungut biaya', 'tanpa biaya', 'no publication fee']):
+                    return "Gratis / Free"
+        except Exception:
+            continue
+
+    return "Tidak terdeteksi (Bisa diisi manual)"
 
 # Helper function to scrape keywords from HTML text
 def search_keywords(text_content):
@@ -322,7 +394,6 @@ def search_keywords(text_content):
         result_tags.append("Bulan: " + "/".join(months_found[:3]))
         
     return ", ".join(result_tags) if result_tags else "Tidak ditemukan kata kunci spesifik"
-
 
 # Helper to count articles and extract current issue title from OJS
 def count_articles_in_current_issue(journal_url, headers):
@@ -404,7 +475,6 @@ def scrape_journal_website(journal_url, headers):
         journal_url = "https://" + journal_url
         
     try:
-        # Visit Homepage
         res = requests.get(journal_url, headers=headers, timeout=12, verify=False)
         html_content = html.unescape(res.text)
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -415,11 +485,9 @@ def scrape_journal_website(journal_url, headers):
         text_content = soup.get_text()
         keywords_summary = search_keywords(text_content)
         scope_summary = extract_scope(soup, text_content)
+        fee_summary = extract_fee(soup, html_content, journal_url, headers)
         
-        # Crawl contact subpages to gather all possible email addresses & contacts
         base_url = journal_url.rstrip('/')
-        
-        # Start with standard fallback urls
         contact_urls = [
             f"{base_url}/about/contact",
             f"{base_url}/about",
@@ -427,7 +495,6 @@ def scrape_journal_website(journal_url, headers):
             f"{base_url}/about/editorialPolicies",
         ]
         
-        # Dynamic link scraper from homepage anchors
         for a in soup.find_all('a', href=True):
             href = a['href']
             href_lower = href.lower()
@@ -445,11 +512,9 @@ def scrape_journal_website(journal_url, headers):
                 f"{base_url}/index.php/about/editorialPolicies"
             ])
             
-        # Deduplicate preserving order
         seen_urls = set()
         unique_urls = [x for x in contact_urls if not (x in seen_urls or seen_urls.add(x))]
         
-        # Prioritize URLs containing 'contact' then 'about'
         contact_priority = []
         about_priority = []
         other_priority = []
@@ -463,7 +528,6 @@ def scrape_journal_website(journal_url, headers):
                 other_priority.append(url)
                 
         sorted_contact_urls = contact_priority + about_priority + other_priority
-        # Limit to max 3 requests to optimize speed while maintaining high accuracy
         target_urls = sorted_contact_urls[:3]
         
         for c_url in target_urls:
@@ -498,10 +562,8 @@ def scrape_journal_website(journal_url, headers):
                 continue
                 
         emails = list(set(emails))
-        # Keep all emails found, separated by comma!
         email_str = ", ".join(emails) if emails else ""
         
-        # Fetch current issue/article count
         issue_data = count_articles_in_current_issue(journal_url, headers)
         if issue_data["count"] > 0:
             last_issue_str = f"{issue_data['count']} Artikel ({issue_data['issue_info']})"
@@ -514,6 +576,7 @@ def scrape_journal_website(journal_url, headers):
             "emails": email_str,
             "other_contacts": other_contacts,
             "scope": scope_summary,
+            "fee": fee_summary,
             "keywords": keywords_summary,
             "last_issue": last_issue_str
         }
@@ -525,6 +588,7 @@ def scrape_journal_website(journal_url, headers):
             "emails": "",
             "other_contacts": "",
             "scope": "Koneksi Gagal",
+            "fee": "Koneksi Gagal",
             "keywords": "Koneksi Gagal",
             "last_issue": "Koneksi Gagal"
         }
@@ -553,20 +617,20 @@ def get_max_sinta_pages(soup):
 st.markdown("""
     <div class="header-container">
         <h1 class="header-title">🚀 SintaJournal-Scraper & Mailer</h1>
-        <p class="header-subtitle">Pencarian Jurnal Sinta 4, Ekstraksi Kontak & Ruang Lingkup (Scope), Ekspor Data, & Pengirim Email Massal Dinamis.</p>
+        <p class="header-subtitle">Pencarian Jurnal Sinta, Ekstraksi Kontak, Scope, Biaya Submit (APC), & Pengirim Email Massal.</p>
     </div>
 """, unsafe_allow_html=True)
 
 # Sidebar Configuration
 st.sidebar.markdown("### 👤 Identitas Pengirim (Anda)")
-sender_name = st.sidebar.text_input("✍️ Nama Lengkap Anda:", value=os.getenv("SENDER_NAME", "Dwi Agustiana Sari"))
-sender_inst = st.sidebar.text_input("🏢 Institusi/Jabatan Anda:", value=os.getenv("SENDER_INSTITUTION", "Mahasiswa Universitas PGRI Ronggolawe Tuban"))
+sender_name = st.sidebar.text_input("✍️ Nama Lengkap Anda:", value=os.getenv("SENDER_NAME", ""), placeholder="Contoh: Dr. Budi Santoso, M.Kom")
+sender_inst = st.sidebar.text_input("🏢 Institusi/Jabatan Anda:", value=os.getenv("SENDER_INSTITUTION", ""), placeholder="Contoh: Universitas Indonesia / Dosen")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ Kredensial SMTP & Pengirim")
 default_email = os.getenv("SENDER_EMAIL", "")
 default_password = os.getenv("SENDER_PASSWORD", "")
-default_subject = os.getenv("EMAIL_SUBJECT", "Pertanyaan Mengenai Kuota Publikasi - {nama_jurnal}")
+default_subject = os.getenv("EMAIL_SUBJECT", "Pertanyaan Mengenai Kuota Publikasi & Biaya Submit - {nama_jurnal}")
 
 sender_email = st.sidebar.text_input("📧 Email Pengirim (Gmail):", value=default_email, placeholder="contoh@gmail.com")
 app_password = st.sidebar.text_input("🔑 App Password (16-digit):", value=default_password, type="password", placeholder="abcd efgh ijkl mnop")
@@ -574,11 +638,11 @@ email_subject = st.sidebar.text_input("✉️ Subject Email:", value=default_sub
 
 # Auto-save credentials & identity to .env silently on change
 try:
-    if (sender_name != os.getenv("SENDER_NAME", "Dwi Agustiana Sari") or
-        sender_inst != os.getenv("SENDER_INSTITUTION", "Mahasiswa Universitas PGRI Ronggolawe Tuban") or
+    if (sender_name != os.getenv("SENDER_NAME", "") or
+        sender_inst != os.getenv("SENDER_INSTITUTION", "") or
         sender_email != os.getenv("SENDER_EMAIL", "") or
         app_password != os.getenv("SENDER_PASSWORD", "") or
-        email_subject != os.getenv("EMAIL_SUBJECT", "Pertanyaan Mengenai Kuota Publikasi - {nama_jurnal}")):
+        email_subject != os.getenv("EMAIL_SUBJECT", "Pertanyaan Mengenai Kuota Publikasi & Biaya Submit - {nama_jurnal}")):
         
         set_key(ENV_PATH, "SENDER_NAME", sender_name)
         set_key(ENV_PATH, "SENDER_INSTITUTION", sender_inst)
@@ -605,19 +669,24 @@ with st.sidebar.expander("❓ Cara Mendapatkan App Password Gmail"):
 if 'scraped_df' not in st.session_state:
     st.session_state.scraped_df = None
 if 'max_sinta_pages' not in st.session_state:
-    st.session_state.max_sinta_pages = 5 # default fallback
+    st.session_state.max_sinta_pages = 5
+if 'sinta_query_search' not in st.session_state:
+    st.session_state.sinta_query_search = ""
 
 # Tab Setup
-tab1, tab2 = st.tabs(["🔍 Tab 1: Scraper Jurnal & Kontak", "✉️ Tab 2: Pengirim Email Massal"])
+tab1, tab2 = st.tabs(["🔍 Tab 1: Scraper Jurnal, Kontak & Biaya", "✉️ Tab 2: Pengirim Email Massal"])
 
 headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "id,en-US;q=0.7,en;q=0.3",
+    "Connection": "keep-alive"
 }
 
 with tab1:
     st.markdown("""
     <div class="card-container">
-        <h4 style="margin-top:0;">📥 Sumber Data & Pencarian Jurnal</h4>
+        <h4 style="margin-top:0;">📥 Sumber Data & Pencarian Jurnal SINTA</h4>
     """, unsafe_allow_html=True)
     
     source_option = st.radio(
@@ -628,14 +697,27 @@ with tab1:
     
     # Render option parameters
     if source_option == "Ambil Otomatis dari Portal SINTA":
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
-            sinta_rank = st.selectbox("Pilih Akreditasi Sinta:", ["Sinta 1", "Sinta 2", "Sinta 3", "Sinta 4", "Sinta 5", "Sinta 6"], index=3) # Sinta 4 default
+            sinta_rank = st.selectbox("Pilih Akreditasi Sinta:", ["Sinta 1", "Sinta 2", "Sinta 3", "Sinta 4", "Sinta 5", "Sinta 6"], index=3)
         with col2:
-            subject_area = st.selectbox("Pilih Bidang Keilmuan:", ["Education (Edukasi)", "Social (Sosial)", "Humanities (Humaniora)", "Science (Sains)", "Economy (Ekonomi)", "Engineering (Teknik)", "Health (Kesehatan)", "Art (Seni)", "Agriculture (Pertanian)", "Religion (Agama)"], index=0) # Education default
+            subject_area = st.selectbox("Pilih Bidang Keilmuan (Sinta Area):", [
+                "Semua Bidang Keilmuan",
+                "Education (Edukasi)", 
+                "Social (Sosial)", 
+                "Humanities (Humaniora)", 
+                "Science (Sains)", 
+                "Economy (Ekonomi)", 
+                "Engineering (Teknik)", 
+                "Health (Kesehatan)", 
+                "Art (Seni)", 
+                "Agriculture (Pertanian)", 
+                "Religion (Agama)"
+            ], index=0)
             
         rank_map = {"Sinta 1": "1", "Sinta 2": "2", "Sinta 3": "3", "Sinta 4": "4", "Sinta 5": "5", "Sinta 6": "6"}
         area_map = {
+            "Semua Bidang Keilmuan": "all",
             "Education (Edukasi)": "6",
             "Social (Sosial)": "9",
             "Humanities (Humaniora)": "3",
@@ -648,43 +730,57 @@ with tab1:
             "Religion (Agama)": "1"
         }
         
-        # Dynamic Pre-fetch to detect max pages on Sinta based on Rank/Subject filters
-        current_filter_key = f"{sinta_rank}_{subject_area}"
-        if 'last_filter_key' not in st.session_state or st.session_state.last_filter_key != current_filter_key:
-            st.session_state.last_filter_key = current_filter_key
-            try:
-                s_rank_val = rank_map[sinta_rank]
-                s_area_val = area_map[subject_area]
-                sinta_session = requests.Session()
-                payload = {
-                    f"filter_accreditation[{s_rank_val}]": s_rank_val,
-                    f"filter_area[{s_area_val}]": s_area_val,
-                    "filter_journals": "1"
-                }
-                # Quick post and get
-                sinta_session.post("https://sinta.kemdiktisaintek.go.id/journals/index/", data=payload, headers=headers, timeout=10)
-                res = sinta_session.get("https://sinta.kemdiktisaintek.go.id/journals/index/", headers=headers, timeout=10)
-                if res.status_code == 200:
-                    soup = BeautifulSoup(res.text, 'html.parser')
-                    st.session_state.max_sinta_pages = get_max_sinta_pages(soup)
-            except Exception:
-                st.session_state.max_sinta_pages = 5
-                
-        with col3:
-            # Slider up to 50 pages with detected limit in help text
-            pages_to_scrape = st.slider(
-                "Jumlah Halaman SINTA yang Di-scrape (10 jurnal/hal):",
-                min_value=1,
-                max_value=50,
-                value=2,
-                help=f"Navigasi awal mendeteksi {st.session_state.max_sinta_pages} halaman, namun Anda bisa menarik hingga 50 jika ada halaman lanjutan."
-            )
+        st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+        st.markdown("#### 🎯 Quick Preset & Pencarian Topik Spesifik")
+        st.caption("Pilih tombol bidang ilmu di bawah untuk mengisi otomatis kata kunci pencarian, atau ketik manual topik jurnal yang dicari:")
+        
+        # Preset Buttons
+        p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
+        with p_col1:
+            if st.button("💻 IT & Komputer"):
+                st.session_state.sinta_query_search = "informatika"
+                st.rerun()
+        with p_col2:
+            if st.button("🎓 Pendidikan"):
+                st.session_state.sinta_query_search = "pendidikan"
+                st.rerun()
+        with p_col3:
+            if st.button("💼 Ekonomi"):
+                st.session_state.sinta_query_search = "ekonomi"
+                st.rerun()
+        with p_col4:
+            if st.button("🏥 Kesehatan"):
+                st.session_state.sinta_query_search = "kesehatan"
+                st.rerun()
+        with p_col5:
+            if st.button("⚙️ Teknik"):
+                st.session_state.sinta_query_search = "teknik"
+                st.rerun()
+        with p_col6:
+            if st.button("🌐 Reset Topik"):
+                st.session_state.sinta_query_search = ""
+                st.rerun()
+
+        sinta_search_query = st.text_input(
+            "🔍 Kata Kunci Topik Jurnal di SINTA:",
+            value=st.session_state.sinta_query_search,
+            placeholder="Contoh: informatika, komputer, sistem informasi, data science, dll."
+        )
+
+        st.markdown("<div style='margin-top: 5px;'></div>", unsafe_allow_html=True)
+        pages_to_scrape = st.slider(
+            "Jumlah Halaman SINTA yang Di-scrape (10 jurnal/hal):",
+            min_value=1,
+            max_value=50,
+            value=3,
+            help="Tentukan berapa banyak halaman daftar jurnal SINTA yang ingin di-scrape."
+        )
             
     elif source_option == "Input URL Jurnal Manual secara Massal":
         st.markdown("**Masukkan URL Jurnal (Satu URL per baris):**")
         manual_urls = st.text_area(
             "Daftar URL:",
-            value="https://adi-journal.org/index.php/ajri\nhttp://journal.unpas.ac.id/index.php/pendas\nhttp://e-journal.hamzanwadi.ac.id/index.php/edc",
+            value="https://join.if.uinsgd.ac.id/index.php/join\nhttps://journal.universitasbumigora.ac.id/index.php/matrik\nhttp://journals.ums.ac.id/index.php/khif",
             height=150,
             help="Tulis alamat website jurnal target lengkap dengan http:// atau https://"
         )
@@ -696,25 +792,25 @@ with tab1:
             try:
                 uploaded_df = pd.read_csv(uploaded_file)
                 
-                # Check for standard columns or try to map them
-                required_cols = ["Nama Jurnal", "Website URL", "Email Tujuan", "Kontak Lain (WA/Telp)", "Scope Jurnal"]
-                missing_cols = [col for col in required_cols if col not in uploaded_df.columns]
+                required_cols = ["Nama Jurnal", "Website URL", "Email Tujuan", "Kontak Lain (WA/Telp)", "Biaya Submit / APC", "Scope Jurnal"]
+                # Fallback check if old format without Biaya Submit
+                if "Biaya Submit / APC" not in uploaded_df.columns:
+                    uploaded_df["Biaya Submit / APC"] = "Belum Diisi"
+
+                missing_cols = [col for col in required_cols if col not in uploaded_df.columns and col != "Biaya Submit / APC"]
                 
                 if not missing_cols:
                     if "Pilih" not in uploaded_df.columns:
                         uploaded_df.insert(0, "Pilih", True)
                     
-                    # Ensure "Pilih" column is boolean type
                     uploaded_df["Pilih"] = uploaded_df["Pilih"].astype(bool)
-                    
                     st.session_state.scraped_df = uploaded_df
                     st.toast("File CSV berhasil diunggah!", icon="✅")
                 else:
-                    st.error(f"Format kolom CSV tidak cocok. Pastikan file CSV memiliki kolom: {', '.join(required_cols)}")
+                    st.error(f"Format kolom CSV tidak cocok. Pastikan file CSV memiliki kolom dasar: Nama Jurnal, Website URL, Email Tujuan, Kontak Lain, Scope Jurnal.")
             except Exception as e:
                 st.error(f"Gagal membaca file CSV: {e}")
                 
-        # Scrape Lanjutan & Sinkronisasi Semua Kontak dalam CSV
         if st.session_state.scraped_df is not None:
             df = st.session_state.scraped_df
             total_rows = len(df)
@@ -722,14 +818,13 @@ with tab1:
             st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
             st.info(f"📊 File CSV terunggah berisi **{total_rows} jurnal**.")
             
-            if st.button("🔄 Sinkronisasi & Validasi Ulang Semua Kontak (Re-Scrape & Gabung)", help="Menelusuri ulang seluruh website jurnal di CSV dan menggabungkan kontak baru dengan data yang sudah ada."):
-                status_container = st.status("Memulai re-scrape dan penggabungan seluruh data kontak...")
+            if st.button("🔄 Sinkronisasi & Validasi Ulang Semua Kontak & Biaya (Re-Scrape & Gabung)", help="Menelusuri ulang seluruh website jurnal di CSV dan menggabungkan kontak & biaya baru."):
+                status_container = st.status("Memulai re-scrape dan penggabungan seluruh data kontak & biaya...")
                 progress_bar = st.progress(0)
                 
                 updated_df = df.copy()
                 start_time = time.time()
                 
-                # Helper merging functions
                 def merge_emails(existing_val, new_val):
                     if not existing_val or pd.isna(existing_val):
                         return new_val if new_val else ""
@@ -763,45 +858,42 @@ with tab1:
                     return "; ".join(combined)
 
                 def is_empty_val(val):
-                    if val is None:
-                        return True
-                    if pd.isna(val):
+                    if val is None or pd.isna(val):
                         return True
                     s = str(val).strip().lower()
-                    return s == "" or s == "nan" or s == "tidak terdeteksi" or "koneksi gagal" in s or "belum diisi" in s
+                    return s == "" or s == "nan" or s == "tidak terdeteksi" or "koneksi gagal" in s or "belum diisi" in s or "tidak terdeteksi (bisa diisi manual)" in s
 
                 for idx in range(total_rows):
                     row = updated_df.iloc[idx]
                     j_url = row["Website URL"]
-                    j_name = row["Nama Jurnal"]
                     
                     status_container.write(f"Validasi Ulang [{idx+1}/{total_rows}]: {j_url}...")
                     
                     scrape_res = scrape_journal_website(j_url, headers)
                     
                     if scrape_res["status"] == "Sukses":
-                        # Merge Email
                         orig_email = row.get("Email Tujuan", "")
                         updated_df.iat[idx, updated_df.columns.get_loc("Email Tujuan")] = merge_emails(orig_email, scrape_res["emails"])
                         
-                        # Merge Kontak Lain
                         orig_contact = row.get("Kontak Lain (WA/Telp)", "")
                         updated_df.iat[idx, updated_df.columns.get_loc("Kontak Lain (WA/Telp)")] = merge_other_contacts(orig_contact, scrape_res["other_contacts"])
                         
-                        # Update Scope (only if empty)
+                        orig_fee = row.get("Biaya Submit / APC", "")
+                        if "Biaya Submit / APC" in updated_df.columns:
+                            if is_empty_val(orig_fee) and scrape_res["fee"]:
+                                updated_df.iat[idx, updated_df.columns.get_loc("Biaya Submit / APC")] = scrape_res["fee"]
+                        else:
+                            updated_df["Biaya Submit / APC"] = scrape_res["fee"]
+                            
                         orig_scope = row.get("Scope Jurnal", "")
                         if is_empty_val(orig_scope) and scrape_res["scope"]:
                             updated_df.iat[idx, updated_df.columns.get_loc("Scope Jurnal")] = scrape_res["scope"]
                             
-                        # Update Jumlah Terbitan Terakhir
                         orig_last_issue = row.get("Jumlah Terbitan Terakhir", "")
                         if "Jumlah Terbitan Terakhir" in updated_df.columns:
                             if is_empty_val(orig_last_issue) and scrape_res["last_issue"]:
                                 updated_df.iat[idx, updated_df.columns.get_loc("Jumlah Terbitan Terakhir")] = scrape_res["last_issue"]
-                        else:
-                            updated_df["Jumlah Terbitan Terakhir"] = ""
-                            updated_df.iat[idx, updated_df.columns.get_loc("Jumlah Terbitan Terakhir")] = scrape_res["last_issue"]
-                            
+                                
                         updated_df.iat[idx, updated_df.columns.get_loc("Status Scraping")] = "Sukses"
                         if is_empty_val(row.get("Judul Web")):
                             updated_df.iat[idx, updated_df.columns.get_loc("Judul Web")] = scrape_res["title"]
@@ -809,7 +901,7 @@ with tab1:
                         updated_df.iat[idx, updated_df.columns.get_loc("Status Scraping")] = scrape_res["status"]
                         
                     progress_bar.progress((idx + 1) / total_rows)
-                    time.sleep(1.0)
+                    time.sleep(0.8)
                     
                 st.session_state.scraped_df = updated_df
                 duration = time.time() - start_time
@@ -817,18 +909,18 @@ with tab1:
                 duration_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
                 
                 status_container.update(state="complete", label=f"Sinkronisasi selesai dalam {duration_str}!")
-                st.toast("Seluruh data kontak berhasil disinkronisasi & digabungkan!", icon="✅")
+                st.toast("Seluruh data kontak & biaya berhasil disinkronisasi!", icon="✅")
                 time.sleep(1)
                 st.rerun()
 
-    # Keyword relevance filtering options (Only for scraping options)
+    # Keyword relevance filtering options (Optional local keyword filter)
     if source_option != "Upload File CSV Hasil Edit (Excel)":
         st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
         col_rel1, col_rel2 = st.columns([1, 2])
         with col_rel1:
-            filter_relevance = st.checkbox("🔍 Filter Relevansi Kata Kunci", value=True, help="Centang untuk menyaring hasil agar hanya menyimpan jurnal yang judul, penerbit, atau scopenya mengandung kata kunci di sebelah kanan.")
+            filter_relevance = st.checkbox("🔍 Filter Relevansi Kata Kunci Lokal", value=False, help="Centang jika ingin menyaring lagi hasil scraping secara spesifik di lokal.")
         with col_rel2:
-            relevance_keywords = st.text_input("Kata Kunci Penyaring (pisahkan dengan koma):", value="sekolah dasar, sd, pendidikan, edukasi, pembelajaran, elementary, primary, education, guru, teacher, paud, tk, learning", help="Contoh: sekolah dasar, sd, pendidikan, edukasi")
+            relevance_keywords = st.text_input("Kata Kunci Penyaring Tambahan (opsional):", value="informatika, komputer, software, sistem informasi, data science, teknologi", help="Contoh: informatika, komputer, teknologi")
     else:
         filter_relevance = False
         relevance_keywords = ""
@@ -837,34 +929,28 @@ with tab1:
 
     # Scrape Trigger
     if source_option != "Upload File CSV Hasil Edit (Excel)":
-        if st.button("🚀 Mulai Scraping & Cari Kontak"):
+        if st.button("🚀 Mulai Scraping & Cari Kontak/Biaya"):
             start_time = time.time()
             journal_targets = []
             
-            # Fetching process
             if source_option == "Ambil Otomatis dari Portal SINTA":
                 status_container = st.status("Menghubungkan ke Portal SINTA...")
                 
                 s_rank_val = rank_map[sinta_rank]
                 s_area_val = area_map[subject_area]
+                q_val = sinta_search_query.strip()
                 
                 sinta_session = requests.Session()
-                url_post = "https://sinta.kemdiktisaintek.go.id/journals/index/"
-                
-                payload = {
-                    f"filter_accreditation[{s_rank_val}]": s_rank_val,
-                    f"filter_area[{s_area_val}]": s_area_val,
-                    "filter_journals": "1"
-                }
                 
                 try:
-                    status_container.write("Mengirimkan filter pencarian ke SINTA...")
-                    sinta_session.post(url_post, data=payload, headers=headers, timeout=15)
-                    
-                    # Fetch pages loop
                     for page in range(1, pages_to_scrape + 1):
                         status_container.write(f"Mengambil daftar jurnal dari SINTA - Halaman {page}...")
-                        url_get = f"https://sinta.kemdiktisaintek.go.id/journals/index/?page={page}"
+                        url_get = f"https://sinta.kemdiktisaintek.go.id/journals/index/?sinta={s_rank_val}&page={page}"
+                        if s_area_val != "all":
+                            url_get += f"&area={s_area_val}"
+                        if q_val:
+                            url_get += f"&q={urllib.parse.quote(q_val)}"
+                            
                         get_res = sinta_session.get(url_get, headers=headers, timeout=15)
                         
                         if get_res.status_code == 200:
@@ -880,7 +966,6 @@ with tab1:
                                     website_url = ""
                                     publisher_name = ""
                                     if parent:
-                                        # Get website url
                                         abbrev_div = parent.find('div', class_='affil-abbrev')
                                         if abbrev_div:
                                             links = abbrev_div.find_all('a')
@@ -889,7 +974,6 @@ with tab1:
                                                 if 'website' in txt:
                                                     website_url = link.get('href')
                                                     break
-                                        # Get publisher/institution name
                                         loc_div = parent.find('div', class_='affil-loc')
                                         if loc_div:
                                             publisher_name = loc_div.text.strip()
@@ -907,7 +991,6 @@ with tab1:
                     st.error(f"Terjadi kesalahan saat scrape SINTA: {e}")
                     
             else:
-                # Manual URL list parsing
                 urls = [u.strip() for u in manual_urls.split('\n') if u.strip()]
                 for u in urls:
                     journal_targets.append({
@@ -916,10 +999,9 @@ with tab1:
                         "publisher": ""
                     })
                     
-            # Scrape Website Details
             if journal_targets:
                 results = []
-                status_container = st.status("Scraping detail isi website jurnal & mencari kontak... (⚠️ Harap tunggu, jangan mengeklik tombol/menu lain agar tidak terinterupsi)") if 'status_container' not in locals() else status_container
+                status_container = st.status("Scraping detail isi website jurnal, kontak, & biaya submit...") if 'status_container' not in locals() else status_container
                 
                 progress_bar = st.progress(0)
                 total = len(journal_targets)
@@ -937,7 +1019,6 @@ with tab1:
                     if j_name == "Jurnal Input Manual" and scrape_res["status"] == "Sukses":
                         final_name = scrape_res["title"].split('|')[0].split('-')[0].strip()
                     
-                    # Relevance filter logic (only for successful scrapes to avoid dropping connection errors)
                     if filter_relevance and scrape_res["status"] == "Sukses":
                         kws = [k.strip().lower() for k in relevance_keywords.split(',') if k.strip()]
                         combined_text = f"{final_name} {scrape_res['scope']} {scrape_res['keywords']} {j_pub}".lower()
@@ -957,6 +1038,7 @@ with tab1:
                         "Website URL": j_url,
                         "Email Tujuan": scrape_res["emails"],
                         "Kontak Lain (WA/Telp)": scrape_res["other_contacts"],
+                        "Biaya Submit / APC": scrape_res["fee"],
                         "Scope Jurnal": scrape_res["scope"],
                         "Jumlah Terbitan Terakhir": scrape_res["last_issue"],
                         "Keywords Terdeteksi": scrape_res["keywords"],
@@ -974,7 +1056,7 @@ with tab1:
                 seconds = int(duration_seconds % 60)
                 duration_str = f"{minutes} menit {seconds} detik" if minutes > 0 else f"{seconds} detik"
                 
-                status_container.update(state="complete", label=f"Scraping detail jurnal dan kontak selesai dalam {duration_str}!")
+                status_container.update(state="complete", label=f"Scraping detail jurnal, kontak, dan biaya submit selesai dalam {duration_str}!")
                 st.success(f"Selesai! Berhasil memproses {len(results)} website jurnal dalam {duration_str}.")
             else:
                 st.warning("Tidak ada target jurnal yang ditemukan untuk di-scrape.")
@@ -988,7 +1070,6 @@ with tab1:
         email_pct = int((emails_found/total_found)*100) if total_found > 0 else 0
         contact_pct = int((other_contacts_found/total_found)*100) if total_found > 0 else 0
 
-        # Dynamic Visual Metrics Dashboard
         st.markdown("### 📊 Ringkasan Data Ditemukan")
         m_col1, m_col2, m_col3 = st.columns(3)
         with m_col1:
@@ -1015,9 +1096,8 @@ with tab1:
             
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("### 📋 Hasil Scraping & Konfigurasi Penerima Email")
-        st.info("💡 **Tips:** Centang kolom **'Pilih'**, periksa alamat **'Email Tujuan'** (bisa diedit jika kosong/salah), dan periksa kolom **'Scope Jurnal'** untuk mengetahui kesesuaian keilmuan.")
+        st.info("💡 **Tips:** Anda dapat langsung mengedit kolom **'Email Tujuan'** atau **'Biaya Submit / APC'** pada tabel di bawah ini jika ingin melengkapi data.")
         
-        # Configure columns for Data Editor
         edited_df = st.data_editor(
             st.session_state.scraped_df,
             column_config={
@@ -1041,6 +1121,10 @@ with tab1:
                 "Kontak Lain (WA/Telp)": st.column_config.TextColumn(
                     "Kontak Lain (WA/Telp)",
                     help="Nomor WhatsApp atau Telepon pengelola jurnal yang terdeteksi."
+                ),
+                "Biaya Submit / APC": st.column_config.TextColumn(
+                    "Biaya Submit / APC",
+                    help="Informasi biaya submit/publikasi jurnal yang terdeteksi. Bisa diedit manual."
                 ),
                 "Scope Jurnal": st.column_config.TextColumn(
                     "Scope Jurnal",
@@ -1071,10 +1155,8 @@ with tab1:
             use_container_width=True
         )
         
-        # Update session state with edits
         st.session_state.scraped_df = edited_df
         
-        # Export Feature
         st.markdown("<br>", unsafe_allow_html=True)
         csv_data = st.session_state.scraped_df.to_csv(index=False).encode('utf-8')
         st.download_button(
@@ -1088,11 +1170,9 @@ with tab1:
 with tab2:
     st.markdown("### ✉️ Editor & Pengirim Email Massal")
     
-    # Check SMTP credentials
     if not sender_email or not app_password:
         st.warning("⚠️ Kredensial SMTP Gmail belum diatur secara lengkap di Sidebar kiri. Harap isi email pengirim dan App Password sebelum mengirim.")
         
-    # Get active target list from Tab 1
     if st.session_state.scraped_df is not None:
         selected_journals = st.session_state.scraped_df[st.session_state.scraped_df["Pilih"] == True]
     else:
@@ -1103,24 +1183,23 @@ with tab2:
     else:
         col_left, col_right = st.columns([2, 1])
         
-        # Dynamic customized template default value
         default_body_template = """Yth. Tim Editor {nama_jurnal} {nama_institusi},
 
-Perkenalkan, saya {nama_pengirim}. Saya bermaksud untuk mengirimkan artikel ke {nama_jurnal}.
+Perkenalkan, saya {nama_pengirim}. Saya bermaksud untuk mengirimkan artikel ilmiah ke {nama_jurnal}.
 
-Sehubungan dengan hal tersebut, saya ingin menanyakan beberapa informasi terkait proses publikasi artikel, yaitu:
+Sehubungan dengan hal tersebut, mohon informasi terkait proses publikasi artikel, antara lain:
 
-1. Berapa biaya publikasi artikel di {nama_jurnal}?
-2. Kapan perkiraan jadwal terbit atau publikasi artikel?
-3. Bagaimana tahapan proses publikasi, mulai dari submit, review, revisi, hingga terbit?
+1. Informasi rincian biaya publikasi (APC / submission fee) di {nama_jurnal}.
+2. Kapan perkiraan jadwal terbit atau estimasi waktu proses review hingga publikasi.
+3. Apakah saat ini masih tersedia kuota untuk terbitan edisi terdekat.
+
 Besar harapan saya untuk memperoleh informasi tersebut sebagai bahan pertimbangan sebelum melakukan submit artikel.
 
-Atas perhatian dan bantuannya, saya ucapkan terima kasih.
+Atas perhatian dan kerja samanya, saya ucapkan terima kasih.
 
 Hormat saya,
 
 {nama_pengirim}
-
 {institusi_pengirim}"""
 
         with col_left:
@@ -1133,35 +1212,34 @@ Hormat saya,
             
         with col_right:
             st.markdown("**Preview Email Dinamis:**")
-            # Show preview for first selected journal
             first_row = selected_journals.iloc[0]
             sample_journal_name = first_row["Nama Jurnal"]
             sample_email = first_row["Email Tujuan"] if first_row["Email Tujuan"] else "[Email Kosong]"
             sample_publisher = first_row["Institusi Penerbit"] if first_row["Institusi Penerbit"] else ""
             
+            disp_sender_name = sender_name if sender_name else "[Nama Anda]"
+            disp_sender_inst = sender_inst if sender_inst else "[Institusi Anda]"
+            
             preview_subject = email_subject.replace("{nama_jurnal}", sample_journal_name)
             
-            # Format body preview
             preview_body = email_body_template\
                 .replace("{nama_jurnal}", sample_journal_name)\
                 .replace("{nama_institusi}", sample_publisher)\
-                .replace("{nama_pengirim}", sender_name)\
-                .replace("{institusi_pengirim}", sender_inst)
+                .replace("{nama_pengirim}", disp_sender_name)\
+                .replace("{institusi_pengirim}", disp_sender_inst)
             
             st.markdown(f"**Kepada:** `{sample_email}`")
             st.markdown(f"**Subject:** `{preview_subject}`")
             st.text_area("Preview Isi Email:", value=preview_body, height=270, disabled=True)
             
-        # Target table overview
         st.markdown(f"### 📋 Daftar Penerima ({len(selected_journals)} Jurnal Terpilih)")
         
-        display_selected = selected_journals[["Nama Jurnal", "Website URL", "Email Tujuan", "Institusi Penerbit", "Kontak Lain (WA/Telp)"]].copy()
+        display_selected = selected_journals[["Nama Jurnal", "Website URL", "Email Tujuan", "Biaya Submit / APC", "Institusi Penerbit", "Kontak Lain (WA/Telp)"]].copy()
         display_selected["Email Tujuan"] = display_selected["Email Tujuan"].apply(
             lambda e: "⚠️ [Belum Diisi - Harap Edit]" if not e else e
         )
         st.dataframe(display_selected, hide_index=True, use_container_width=True)
         
-        # Email send trigger
         if st.button("✈️ Kirim Email Massal"):
             has_empty_email = any(not e for e in selected_journals["Email Tujuan"])
             if has_empty_email:
@@ -1206,18 +1284,16 @@ Hormat saya,
                             j_email = row["Email Tujuan"]
                             j_pub = row["Institusi Penerbit"] if row["Institusi Penerbit"] else ""
                             
-                            # Support multiple emails separated by comma or semicolon
                             j_emails = [e.strip() for e in re.split(r'[,;]', str(j_email)) if e.strip()]
                             
                             status_area.info(f"Mengirim email ke: {j_name} ({', '.join(j_emails)})...")
                             
-                            # Format Subject and Body
                             subj = email_subject.replace("{nama_jurnal}", j_name)
                             body = email_body_template\
                                 .replace("{nama_jurnal}", j_name)\
                                 .replace("{nama_institusi}", j_pub)\
-                                .replace("{nama_pengirim}", sender_name)\
-                                .replace("{institusi_pengirim}", sender_inst)
+                                .replace("{nama_pengirim}", sender_name if sender_name else "Pengirim")\
+                                .replace("{institusi_pengirim}", sender_inst if sender_inst else "")
                             
                             msg = MIMEMultipart()
                             msg['From'] = sender_email
@@ -1234,7 +1310,7 @@ Hormat saya,
                                 st.write(f"❌ **Gagal:** Pengiriman ke {j_name} (`{', '.join(j_emails)}`) error: {email_err}")
                                 
                             send_progress.progress((i + 1) / total_emails)
-                            time.sleep(1.5) # Anti-spam delay
+                            time.sleep(1.5)
                             
                         server.quit()
                         status_area.empty()
