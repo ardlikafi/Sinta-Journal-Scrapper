@@ -984,6 +984,34 @@ with st.sidebar.expander("❓ Cara Mendapatkan App Password Gmail"):
     6. Salin **16 karakter** sandi yang muncul dan masukkan ke kolom Password di atas (tanpa spasi).
     """)
 
+# Rich Multi-Keyword Presets Dictionary
+PRESETS_MAP = {
+    "it": {
+        "sinta": "informatika",
+        "keywords": "informatika, komputer, software, sistem informasi, data science, teknologi, komputasi, IT, rekayasa perangkat lunak"
+    },
+    "pendidikan": {
+        "sinta": "pendidikan",
+        "keywords": "pendidikan, pembelajaran, pengajaran, edukasi, sekolah, kurikulum, pedagogi, pengajaran"
+    },
+    "ekonomi": {
+        "sinta": "ekonomi",
+        "keywords": "ekonomi, manajemen, akuntansi, bisnis, keuangan, kewirausahaan, perbankan, pasar"
+    },
+    "kesehatan": {
+        "sinta": "kesehatan",
+        "keywords": "kesehatan, kedokteran, keperawatan, farmasi, gizi, kebidanan, medis, klinis"
+    },
+    "teknik": {
+        "sinta": "teknik",
+        "keywords": "teknik, rekayasa, sipil, mesin, elektro, industri, arsitektur, lingkungan"
+    },
+    "reset": {
+        "sinta": "",
+        "keywords": ""
+    }
+}
+
 # Session State Initializations & Persistence
 if 'scraped_df' not in st.session_state:
     st.session_state.scraped_df = None
@@ -1000,15 +1028,12 @@ if 'relevance_keywords' not in st.session_state:
 if 'filter_relevance' not in st.session_state:
     st.session_state.filter_relevance = False
 
-# Quick Preset Button Callback Function
-def apply_quick_preset(keyword):
-    st.session_state["sinta_query_search"] = keyword
-    if keyword:
-        st.session_state["relevance_keywords"] = keyword
-        st.session_state["filter_relevance"] = True
-    else:
-        st.session_state["relevance_keywords"] = ""
-        st.session_state["filter_relevance"] = False
+# Quick Preset Button Callback Function with Rich Auto-fill
+def apply_quick_preset(preset_key):
+    preset = PRESETS_MAP.get(preset_key, {"sinta": "", "keywords": ""})
+    st.session_state["sinta_query_search"] = preset["sinta"]
+    st.session_state["relevance_keywords"] = preset["keywords"]
+    st.session_state["filter_relevance"] = True if preset["keywords"] else False
 
 # Tab Setup
 tab1, tab2 = st.tabs(["🔍 Tab 1: Scraper Jurnal, Kontak & Biaya", "✉️ Tab 2: Pengirim Email Massal"])
@@ -1079,10 +1104,10 @@ with tab1:
         st.markdown("#### 🎯 Quick Preset & Pencarian Topik Spesifik")
         st.caption("Pilih tombol bidang ilmu di bawah untuk mengisi otomatis kata kunci pencarian, atau ketik manual topik jurnal yang dicari:")
         
-        # Preset Buttons with seamless callback
+        # Preset Buttons with seamless callback & multi-keyword auto fill
         p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
         with p_col1:
-            st.button("💻 IT & Komputer", on_click=apply_quick_preset, args=("informatika",))
+            st.button("💻 IT & Komputer", on_click=apply_quick_preset, args=("it",))
         with p_col2:
             st.button("🎓 Pendidikan", on_click=apply_quick_preset, args=("pendidikan",))
         with p_col3:
@@ -1092,7 +1117,7 @@ with tab1:
         with p_col5:
             st.button("⚙️ Teknik", on_click=apply_quick_preset, args=("teknik",))
         with p_col6:
-            st.button("🌐 Reset Topik", on_click=apply_quick_preset, args=("",))
+            st.button("🌐 Reset Topik", on_click=apply_quick_preset, args=("reset",))
 
         sinta_search_query = st.text_input(
             "🔍 Kata Kunci Topik Jurnal di SINTA:",
