@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SintaJournal-Scraper & Mailer (HIGH PERFORMANCE MULTITHREADED VERSION)
+SintaJournal-Scraper & Mailer (OPTIMIZED & HIGH-ACCURACY VERSION)
 A Streamlit web application to scrape Sinta journals, extract contacts, APC submission fees, and send mass emails using SMTP Gmail.
 
 Cara Menjalankan:
@@ -165,6 +165,27 @@ def decode_cloudflare_email(cf_hex):
     except Exception:
         return ""
 
+# Safe BeautifulSoup parser creator
+def parse_html_safe(html_content):
+    try:
+        return BeautifulSoup(html_content, 'lxml')
+    except Exception:
+        return BeautifulSoup(html_content, 'html.parser')
+
+# Check if page is a Cloudflare / Bot protection challenge page
+def is_cloudflare_challenge(html_text, soup=None):
+    text_lower = soup.get_text().lower() if soup else html_text.lower()
+    indicators = [
+        'just a moment...',
+        'enable javascript and cookies',
+        'cf-browser-verification',
+        'attention required! | cloudflare',
+        'ddos-guard',
+        'access denied',
+        'security check'
+    ]
+    return any(ind in text_lower for ind in indicators)
+
 # ============================================================================
 # OPTIMIZATION: Pre-compiled Regex Patterns (High Performance & Accuracy)
 # ============================================================================
@@ -249,50 +270,90 @@ def set_cached_url(url, content):
                 del _url_cache[k]
         _url_cache[url] = content
 
-# Helper function to parse emails (standard, mailto, Cloudflare, & obfuscated)
+# Helper function to parse emails accurately (ignoring JS scripts, Cloudflare garbage, & fake domains)
 def extract_emails(html_text, soup=None):
+    if not soup:
+        soup = parse_html_safe(html_text)
+        
+    if is_cloudflare_challenge(html_text, soup):
+        return []
+        
+    # Create clean copy without scripts, styles, heads, & SVG objects
+    soup_copy = BeautifulSoup(str(soup), 'html.parser')
+    for tag in soup_copy(['script', 'style', 'head', 'iframe', 'svg', 'noscript', 'path']):
+        tag.decompose()
+        
+    clean_html = html.unescape(str(soup_copy))
     valid_emails = set()
-    html_text_decoded = html.unescape(html_text)
     
-    # 1. Decode Cloudflare emails
-    cf_matches = REGEX_PATTERNS['cloudflare_email'].findall(html_text_decoded)
+    # 1. Extract & URL-decode mailto: links (handles %64%69%6d... format)
+    for a in soup_copy.find_all('a', href=True):
+        href = a['href']
+        if href.lower().startswith('mailto:'):
+            raw_e = href.split('mailto:')[1].split('?')[0].strip()
+            decoded_e = urllib.parse.unquote(raw_e).strip().lower()
+            if '@' in decoded_e and '.' in decoded_e:
+                valid_emails.add(decoded_e)
+                
+    # 2. Extract Cloudflare hex emails
+    cf_matches = REGEX_PATTERNS['cloudflare_email'].findall(html_text)
     for cf_hex in cf_matches:
         decoded = decode_cloudflare_email(cf_hex)
-        if decoded and '@' in decoded:
+        if decoded and '@' in decoded and '.' in decoded:
             valid_emails.add(decoded.lower().strip())
-            
-    # 2. Extract mailto: links from soup if available
-    if soup:
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if href.lower().startswith('mailto:'):
-                clean_e = href.split('mailto:')[1].split('?')[0].strip()
-                if '@' in clean_e:
-                    valid_emails.add(clean_e.lower())
-                    
-    # 3. Extract standard emails from text
-    raw_emails = REGEX_PATTERNS['email'].findall(html_text_decoded)
-    for email in raw_emails:
-        email_clean = email.strip().rstrip('.')
-        if not email_clean.endswith(('.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.svg', '.webp', '.pdf', '.docx', '.zip', '.rar')):
-            valid_emails.add(email_clean.lower())
-            
-    # 4. Extract obfuscated emails (e.g. name [at] domain [dot] com)
-    obfuscated_pattern = re.compile(
-        r'([a-zA-Z0-9._%+-]+)\s*(?:\[|\(|\s)*\s*(?:at|@)\s*(?:\]|\)|\s)*\s*([a-zA-Z0-9.-]+)\s*(?:\[|\(|\s)*\s*(?:dot|\.)\s*(?:\]|\)|\s)*\s*([a-zA-Z]{2,5})',
-        re.I
-    )
-    for m in obfuscated_pattern.finditer(html_text_decoded):
-        u, d, t = m.groups()
-        if u and d and t and u.lower() not in ['info', 'contact'] and len(t) <= 5:
-            reconstructed = f"{u}@{d}.{t}".lower()
-            if not reconstructed.endswith(('.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.svg')):
-                valid_emails.add(reconstructed)
 
-    return list(valid_emails)
+    # 3. Extract standard emails from cleaned HTML
+    raw_emails = REGEX_PATTERNS['email'].findall(clean_html)
+    for email in raw_emails:
+        email_clean = email.strip().rstrip('.').lower()
+        valid_emails.add(email_clean)
+
+    # Filtering rules for junk/system/code emails
+    junk_domains = {
+        'counter.com', 'cloudflareinsights.com', 'schema.org', 'w3.org',
+        'wordpress.org', 'example.com', 'domain.com', 'sentry.io',
+        'googleapis.com', 'github.com', 'facebook.com', 'twitter.com',
+        'google.com', 'googletagmanager.com', 'gravatar.com', 'site.com',
+        'email.com', 'yourdomain.com', 'yourname.com', 'myjournal.com',
+        'ion-analytics', 'creativecommons.org', 'doubleclick.net',
+        'journalrightslegalsystem', 'alayer.push', 'abasemanager.php',
+        'pkpapplication', 'application.php', 'ivecommons.org', 'ivecommons.com'
+    }
+    
+    junk_substrings = [
+        'applic@', 'pkpapplic@', 'd@abase', 'window.loc@', 'headernavigi@',
+        'educ@ion', 'elkuator-cit@', 'loc@ion', 'templ@e', 'st@ic',
+        'specific@ion', 'public@ion', 'inform@ion', 'notific@ion',
+        'administr@ion', 'organiz@ion', 'verific@ion', 'confirm@ion',
+        'registra@ion', 'submissi@on', 'ptcsbyx', 'c.st@'
+    ]
+    
+    junk_extensions = (
+        '.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.svg', '.webp',
+        '.pdf', '.docx', '.zip', '.rar', '.php', '.asp', '.aspx', '.jsp',
+        '.html', '.htm', '.json', '.xml', '.mp4', '.mp3', '.ico', '.ttf',
+        '.woff', '.woff2', '.eot', '.map', '.title', '.hostn', '.addit',
+        '.push', '.dotx', '.reloa'
+    )
+
+    filtered = []
+    for e in valid_emails:
+        if any(e.endswith(ext) for ext in junk_extensions):
+            continue
+        domain = e.split('@')[1] if '@' in e else ''
+        if domain in junk_domains or any(jd in domain for jd in ['counter.com', 'cloudflare', 'schema.org', 'creativecommons']):
+            continue
+        if any(js in e for js in junk_substrings):
+            continue
+        filtered.append(e)
+
+    return filtered
 
 # Helper function to extract other contacts (Phone & WhatsApp)
 def extract_other_contacts(html_text, soup):
+    if is_cloudflare_challenge(html_text, soup):
+        return ""
+        
     contacts = set()
     
     # 1. Look for tel: links
@@ -300,7 +361,7 @@ def extract_other_contacts(html_text, soup):
     for link in tel_links:
         num = link.get('href').replace('tel:', '').strip()
         num = re.sub(r'[\s\-]', '', num)
-        if num:
+        if num and len(num) >= 6:
             contacts.add(f"Telp: {num}")
             
     # 2. Look for WhatsApp links (wa.me or api.whatsapp.com)
@@ -315,9 +376,12 @@ def extract_other_contacts(html_text, soup):
             contacts.add("WA Link")
             
     # 3. Look for phone number patterns in page text
-    text_content = soup.get_text()
-    found_nums = REGEX_PATTERNS['phone_id'].findall(text_content)
+    soup_copy = BeautifulSoup(str(soup), 'html.parser')
+    for tag in soup_copy(['script', 'style', 'head', 'iframe', 'svg', 'noscript']):
+        tag.decompose()
+    text_content = soup_copy.get_text()
     
+    found_nums = REGEX_PATTERNS['phone_id'].findall(text_content)
     for num in found_nums:
         clean_num = re.sub(r'[\s\-]', '', num)
         if 9 <= len(clean_num) <= 15:
@@ -326,13 +390,6 @@ def extract_other_contacts(html_text, soup):
             else:
                 contacts.add(f"Tel: {clean_num}")
                 
-    # 4. Search in text for telephone labels
-    text_matches = REGEX_PATTERNS['tel_text'].findall(text_content.lower())
-    for val in text_matches:
-        clean_val = re.sub(r'[\s\-]', '', val)
-        if len(clean_val) >= 6:
-            contacts.add(f"Telp: {val.strip()}")
-
     result_list = list(contacts)
     result_list.sort(key=lambda s: 0 if s.startswith("WA") else 1)
     
@@ -379,6 +436,9 @@ def extract_scope(soup, text_content):
 
 # Helper to extract Publication / Submission Fee (APC)
 def extract_fee(soup, html_text, journal_url, headers, session=None):
+    if is_cloudflare_challenge(html_text, soup):
+        return "Koneksi Gagal (Terlindungi Cloudflare)"
+        
     fee_keywords = [
         "author fee", "author fees", "biaya penulisan", "biaya publikasi", 
         "publication fee", "submission fee", "article processing charge", 
@@ -446,7 +506,7 @@ def extract_fee(soup, html_text, journal_url, headers, session=None):
                 f_res = req_session.get(f_url, headers=headers, timeout=5, verify=False)
                 if f_res.status_code == 200:
                     f_html = html.unescape(f_res.text)
-                    f_soup = BeautifulSoup(f_html, 'lxml')
+                    f_soup = parse_html_safe(f_html)
                     f_text = f_soup.get_text()
                     set_cached_url(f_url, (f_html, f_soup, f_text))
                 else:
@@ -545,7 +605,7 @@ def count_articles_in_current_issue(journal_url, headers, session=None):
                 res = req_session.get(url, headers=headers, timeout=5, verify=False)
                 if res.status_code == 200:
                     html_content = html.unescape(res.text)
-                    soup = BeautifulSoup(html_content, 'lxml')
+                    soup = parse_html_safe(html_content)
                     set_cached_url(url, soup)
                 else:
                     continue
@@ -592,7 +652,7 @@ def count_articles_in_current_issue(journal_url, headers, session=None):
         "issue_info": "Tidak terdeteksi"
     }
 
-# Helper function to scrape a single journal URL with Early Exit optimization
+# Helper function to scrape a single journal URL with Early Exit & Cloudflare protection check
 def scrape_journal_website(journal_url, headers, session=None):
     journal_url = journal_url.strip()
     if not journal_url.startswith(("http://", "https://")):
@@ -602,9 +662,33 @@ def scrape_journal_website(journal_url, headers, session=None):
     
     try:
         res = req_session.get(journal_url, headers=headers, timeout=8, verify=False)
+        if res.status_code != 200:
+            return {
+                "status": f"HTTP Error {res.status_code}",
+                "title": "Gagal Akses",
+                "emails": "",
+                "other_contacts": "",
+                "scope": "Koneksi Gagal",
+                "fee": "Koneksi Gagal",
+                "keywords": "Koneksi Gagal",
+                "last_issue": "Koneksi Gagal"
+            }
+            
         html_content = html.unescape(res.text)
-        soup = BeautifulSoup(html_content, 'lxml')
+        soup = parse_html_safe(html_content)
         
+        if is_cloudflare_challenge(html_content, soup):
+            return {
+                "status": "Terlindungi Cloudflare",
+                "title": "Akses Terlindungi (Cloudflare)",
+                "emails": "",
+                "other_contacts": "",
+                "scope": "Terlindungi Cloudflare",
+                "fee": "Terlindungi Cloudflare",
+                "keywords": "Terlindungi Cloudflare",
+                "last_issue": "Terlindungi Cloudflare"
+            }
+            
         title = soup.title.string.strip() if soup.title else "No Title"
         emails = extract_emails(html_content, soup)
         other_contacts = extract_other_contacts(html_content, soup)
@@ -613,7 +697,6 @@ def scrape_journal_website(journal_url, headers, session=None):
         scope_summary = extract_scope(soup, text_content)
         fee_summary = extract_fee(soup, html_content, journal_url, headers, req_session)
         
-        # Early Exit check: if email & fee are already complete from homepage, skip extra subpages!
         has_good_email = len(emails) > 0
         has_good_fee = fee_summary and "tidak terdeteksi" not in fee_summary.lower()
         
@@ -670,7 +753,7 @@ def scrape_journal_website(journal_url, headers, session=None):
                         c_res = req_session.get(c_url, headers=headers, timeout=5, verify=False)
                         if c_res.status_code == 200:
                             c_html = html.unescape(c_res.text)
-                            c_soup = BeautifulSoup(c_html, 'lxml')
+                            c_soup = parse_html_safe(c_html)
                             c_text = c_soup.get_text()
                             set_cached_url(c_url, (c_soup, c_text, c_html))
                         else:
@@ -735,9 +818,6 @@ def scrape_journal_website(journal_url, headers, session=None):
 # OPTIMIZATION: Concurrent Scraping Function with ThreadPoolExecutor
 # ============================================================================
 def scrape_journals_concurrent(journal_targets, headers, max_workers=10, progress_callback=None):
-    """
-    Scrape multiple journals concurrently using ThreadPoolExecutor.
-    """
     results = []
     total = len(journal_targets)
     session = session_manager.get_session()
@@ -808,7 +888,7 @@ def fetch_sinta_page(args):
     try:
         get_res = session.get(url_get, headers=headers, timeout=15)
         if get_res.status_code == 200:
-            soup = BeautifulSoup(get_res.text, 'html.parser')
+            soup = parse_html_safe(get_res.text)
             journal_divs = soup.find_all('div', class_='affil-name')
             
             for div in journal_divs:
@@ -977,32 +1057,32 @@ with tab1:
         p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
         with p_col1:
             if st.button("💻 IT & Komputer"):
-                st.session_state.sinta_query_search = "informatika"
+                st.session_state["sinta_query_search"] = "informatika"
                 st.rerun()
         with p_col2:
             if st.button("🎓 Pendidikan"):
-                st.session_state.sinta_query_search = "pendidikan"
+                st.session_state["sinta_query_search"] = "pendidikan"
                 st.rerun()
         with p_col3:
             if st.button("💼 Ekonomi"):
-                st.session_state.sinta_query_search = "ekonomi"
+                st.session_state["sinta_query_search"] = "ekonomi"
                 st.rerun()
         with p_col4:
             if st.button("🏥 Kesehatan"):
-                st.session_state.sinta_query_search = "kesehatan"
+                st.session_state["sinta_query_search"] = "kesehatan"
                 st.rerun()
         with p_col5:
             if st.button("⚙️ Teknik"):
-                st.session_state.sinta_query_search = "teknik"
+                st.session_state["sinta_query_search"] = "teknik"
                 st.rerun()
         with p_col6:
             if st.button("🌐 Reset Topik"):
-                st.session_state.sinta_query_search = ""
+                st.session_state["sinta_query_search"] = ""
                 st.rerun()
 
         sinta_search_query = st.text_input(
             "🔍 Kata Kunci Topik Jurnal di SINTA:",
-            value=st.session_state.sinta_query_search,
+            key="sinta_query_search",
             placeholder="Contoh: informatika, komputer, sistem informasi, data science, dll."
         )
 
@@ -1167,9 +1247,11 @@ with tab1:
         st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
         col_rel1, col_rel2 = st.columns([1, 2])
         with col_rel1:
-            filter_relevance = st.checkbox("🔍 Filter Relevansi Kata Kunci Lokal", value=False, help="Centang jika ingin menyaring lagi hasil scraping secara spesifik di lokal.")
+            auto_rel_default = True if (source_option == "Ambil Otomatis dari Portal SINTA" and st.session_state.get("sinta_query_search", "").strip() != "") else False
+            filter_relevance = st.checkbox("🔍 Filter Relevansi Kata Kunci Lokal", value=auto_rel_default, help="Centang jika ingin menyaring lagi hasil scraping secara spesifik di lokal.")
         with col_rel2:
-            relevance_keywords = st.text_input("Kata Kunci Penyaring Tambahan (opsional):", value="informatika, komputer, software, sistem informasi, data science, teknologi", help="Contoh: informatika, komputer, teknologi")
+            default_kw_val = st.session_state.get("sinta_query_search", "") if st.session_state.get("sinta_query_search", "") else "informatika, komputer, software, sistem informasi, data science, teknologi"
+            relevance_keywords = st.text_input("Kata Kunci Penyaring Tambahan (opsional):", value=default_kw_val, help="Contoh: informatika, komputer, teknologi")
     else:
         filter_relevance = False
         relevance_keywords = ""
@@ -1187,7 +1269,7 @@ with tab1:
                 
                 s_rank_val = rank_map[sinta_rank]
                 s_area_val = area_map[subject_area]
-                q_val = sinta_search_query.strip()
+                q_val = sinta_search_query.strip() if sinta_search_query else ""
                 
                 try:
                     status_container.write(f"Mengambil daftar jurnal dari SINTA ({pages_to_scrape} halaman paralel)...")
@@ -1200,6 +1282,10 @@ with tab1:
                         page_results.sort(key=lambda x: x[0])
                         for _, targets in page_results:
                             journal_targets.extend(targets)
+                    
+                    # Deduplicate targets by URL
+                    seen_t_urls = set()
+                    journal_targets = [t for t in journal_targets if not (t["url"] in seen_t_urls or seen_t_urls.add(t["url"]))]
                     
                     status_container.write(f"Berhasil menemukan {len(journal_targets)} jurnal dari SINTA.")
                 except Exception as e:
@@ -1235,16 +1321,13 @@ with tab1:
                     j_pub = item["j_pub"]
                     scrape_res = item["result"]
                     
-                    if filter_relevance and scrape_res["status"] == "Sukses":
+                    # Relevance Filtering Check
+                    if filter_relevance:
                         kws = [k.strip().lower() for k in relevance_keywords.split(',') if k.strip()]
-                        combined_text = f"{final_name} {scrape_res['scope']} {scrape_res['keywords']} {j_pub}".lower()
-                        match_found = False
-                        for kw in kws:
-                            if kw in combined_text:
-                                match_found = True
-                                break
+                        combined_text = f"{final_name} {scrape_res['scope']} {scrape_res['keywords']} {j_pub} {scrape_res['title']}".lower()
+                        match_found = any(kw in combined_text for kw in kws)
                         if not match_found:
-                            status_container.write(f"ℹ️ Dilewati (tidak relevan): {final_name}")
+                            status_container.write(f"ℹ️ Dilewati (tidak relevan topik): {final_name}")
                             continue
                         
                     results.append({
@@ -1270,15 +1353,18 @@ with tab1:
                 duration_str = f"{minutes} menit {seconds} detik" if minutes > 0 else f"{seconds} detik"
                 
                 status_container.update(state="complete", label=f"Scraping detail jurnal, kontak, dan biaya submit selesai dalam {duration_str}!")
-                st.success(f"Selesai! Berhasil memproses {len(results)} website jurnal dalam {duration_str}.")
+                if len(results) > 0:
+                    st.success(f"Selesai! Berhasil memproses {len(results)} website jurnal relevan dalam {duration_str}.")
+                else:
+                    st.warning("Scraping selesai, namun tidak ada jurnal yang cocok dengan kata kunci relevansi Anda. Coba matikan atau sesuaikan kata kunci penyaring.")
             else:
                 st.warning("Tidak ada target jurnal yang ditemukan untuk di-scrape.")
             
     # Display table results
-    if st.session_state.scraped_df is not None:
+    if st.session_state.scraped_df is not None and not st.session_state.scraped_df.empty:
         total_found = len(st.session_state.scraped_df)
-        emails_found = st.session_state.scraped_df["Email Tujuan"].apply(lambda e: 1 if e else 0).sum()
-        other_contacts_found = st.session_state.scraped_df["Kontak Lain (WA/Telp)"].apply(lambda c: 1 if c else 0).sum()
+        emails_found = st.session_state.scraped_df["Email Tujuan"].apply(lambda e: 1 if (e and str(e).strip() != "") else 0).sum()
+        other_contacts_found = st.session_state.scraped_df["Kontak Lain (WA/Telp)"].apply(lambda c: 1 if (c and str(c).strip() != "") else 0).sum()
         
         email_pct = int((emails_found/total_found)*100) if total_found > 0 else 0
         contact_pct = int((other_contacts_found/total_found)*100) if total_found > 0 else 0
@@ -1295,7 +1381,7 @@ with tab1:
         with m_col2:
             st.markdown(f"""
                 <div class="metric-card">
-                    <p style="font-size:0.9rem;color:#6B7280;margin:0;font-weight:600;">Email Ditemukan</p>
+                    <p style="font-size:0.9rem;color:#6B7280;margin:0;font-weight:600;">Email Ditemukan Valid</p>
                     <p style="font-size:2.2rem;color:#059669;margin:0;font-weight:800;">{emails_found} <span style="font-size:1rem;font-weight:400;">({email_pct}%)</span></p>
                 </div>
             """, unsafe_allow_html=True)
@@ -1386,7 +1472,7 @@ with tab2:
     if not sender_email or not app_password:
         st.warning("⚠️ Kredensial SMTP Gmail belum diatur secara lengkap di Sidebar kiri. Harap isi email pengirim dan App Password sebelum mengirim.")
         
-    if st.session_state.scraped_df is not None:
+    if st.session_state.scraped_df is not None and not st.session_state.scraped_df.empty:
         selected_journals = st.session_state.scraped_df[st.session_state.scraped_df["Pilih"] == True]
     else:
         selected_journals = pd.DataFrame()
