@@ -984,13 +984,31 @@ with st.sidebar.expander("❓ Cara Mendapatkan App Password Gmail"):
     6. Salin **16 karakter** sandi yang muncul dan masukkan ke kolom Password di atas (tanpa spasi).
     """)
 
-# Session State Initializations
+# Session State Initializations & Persistence
 if 'scraped_df' not in st.session_state:
     st.session_state.scraped_df = None
 if 'max_sinta_pages' not in st.session_state:
     st.session_state.max_sinta_pages = 5
 if 'sinta_query_search' not in st.session_state:
     st.session_state.sinta_query_search = ""
+if 'sinta_rank' not in st.session_state:
+    st.session_state.sinta_rank = "Sinta 4"
+if 'subject_area' not in st.session_state:
+    st.session_state.subject_area = "Semua Bidang Keilmuan"
+if 'relevance_keywords' not in st.session_state:
+    st.session_state.relevance_keywords = ""
+if 'filter_relevance' not in st.session_state:
+    st.session_state.filter_relevance = False
+
+# Quick Preset Button Callback Function
+def apply_quick_preset(keyword):
+    st.session_state["sinta_query_search"] = keyword
+    if keyword:
+        st.session_state["relevance_keywords"] = keyword
+        st.session_state["filter_relevance"] = True
+    else:
+        st.session_state["relevance_keywords"] = ""
+        st.session_state["filter_relevance"] = False
 
 # Tab Setup
 tab1, tab2 = st.tabs(["🔍 Tab 1: Scraper Jurnal, Kontak & Biaya", "✉️ Tab 2: Pengirim Email Massal"])
@@ -1018,21 +1036,29 @@ with tab1:
     if source_option == "Ambil Otomatis dari Portal SINTA":
         col1, col2 = st.columns(2)
         with col1:
-            sinta_rank = st.selectbox("Pilih Akreditasi Sinta:", ["Sinta 1", "Sinta 2", "Sinta 3", "Sinta 4", "Sinta 5", "Sinta 6"], index=3)
+            sinta_rank = st.selectbox(
+                "Pilih Akreditasi Sinta:", 
+                ["Sinta 1", "Sinta 2", "Sinta 3", "Sinta 4", "Sinta 5", "Sinta 6"], 
+                key="sinta_rank"
+            )
         with col2:
-            subject_area = st.selectbox("Pilih Bidang Keilmuan (Sinta Area):", [
-                "Semua Bidang Keilmuan",
-                "Education (Edukasi)", 
-                "Social (Sosial)", 
-                "Humanities (Humaniora)", 
-                "Science (Sains)", 
-                "Economy (Ekonomi)", 
-                "Engineering (Teknik)", 
-                "Health (Kesehatan)", 
-                "Art (Seni)", 
-                "Agriculture (Pertanian)", 
-                "Religion (Agama)"
-            ], index=0)
+            subject_area = st.selectbox(
+                "Pilih Bidang Keilmuan (Sinta Area):", 
+                [
+                    "Semua Bidang Keilmuan",
+                    "Education (Edukasi)", 
+                    "Social (Sosial)", 
+                    "Humanities (Humaniora)", 
+                    "Science (Sains)", 
+                    "Economy (Ekonomi)", 
+                    "Engineering (Teknik)", 
+                    "Health (Kesehatan)", 
+                    "Art (Seni)", 
+                    "Agriculture (Pertanian)", 
+                    "Religion (Agama)"
+                ], 
+                key="subject_area"
+            )
             
         rank_map = {"Sinta 1": "1", "Sinta 2": "2", "Sinta 3": "3", "Sinta 4": "4", "Sinta 5": "5", "Sinta 6": "6"}
         area_map = {
@@ -1053,32 +1079,20 @@ with tab1:
         st.markdown("#### 🎯 Quick Preset & Pencarian Topik Spesifik")
         st.caption("Pilih tombol bidang ilmu di bawah untuk mengisi otomatis kata kunci pencarian, atau ketik manual topik jurnal yang dicari:")
         
-        # Preset Buttons
+        # Preset Buttons with seamless callback
         p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
         with p_col1:
-            if st.button("💻 IT & Komputer"):
-                st.session_state["sinta_query_search"] = "informatika"
-                st.rerun()
+            st.button("💻 IT & Komputer", on_click=apply_quick_preset, args=("informatika",))
         with p_col2:
-            if st.button("🎓 Pendidikan"):
-                st.session_state["sinta_query_search"] = "pendidikan"
-                st.rerun()
+            st.button("🎓 Pendidikan", on_click=apply_quick_preset, args=("pendidikan",))
         with p_col3:
-            if st.button("💼 Ekonomi"):
-                st.session_state["sinta_query_search"] = "ekonomi"
-                st.rerun()
+            st.button("💼 Ekonomi", on_click=apply_quick_preset, args=("ekonomi",))
         with p_col4:
-            if st.button("🏥 Kesehatan"):
-                st.session_state["sinta_query_search"] = "kesehatan"
-                st.rerun()
+            st.button("🏥 Kesehatan", on_click=apply_quick_preset, args=("kesehatan",))
         with p_col5:
-            if st.button("⚙️ Teknik"):
-                st.session_state["sinta_query_search"] = "teknik"
-                st.rerun()
+            st.button("⚙️ Teknik", on_click=apply_quick_preset, args=("teknik",))
         with p_col6:
-            if st.button("🌐 Reset Topik"):
-                st.session_state["sinta_query_search"] = ""
-                st.rerun()
+            st.button("🌐 Reset Topik", on_click=apply_quick_preset, args=("",))
 
         sinta_search_query = st.text_input(
             "🔍 Kata Kunci Topik Jurnal di SINTA:",
@@ -1247,11 +1261,17 @@ with tab1:
         st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
         col_rel1, col_rel2 = st.columns([1, 2])
         with col_rel1:
-            auto_rel_default = True if (source_option == "Ambil Otomatis dari Portal SINTA" and st.session_state.get("sinta_query_search", "").strip() != "") else False
-            filter_relevance = st.checkbox("🔍 Filter Relevansi Kata Kunci Lokal", value=auto_rel_default, help="Centang jika ingin menyaring lagi hasil scraping secara spesifik di lokal.")
+            filter_relevance = st.checkbox(
+                "🔍 Filter Relevansi Kata Kunci Lokal", 
+                key="filter_relevance", 
+                help="Centang jika ingin menyaring lagi hasil scraping secara spesifik di lokal."
+            )
         with col_rel2:
-            default_kw_val = st.session_state.get("sinta_query_search", "") if st.session_state.get("sinta_query_search", "") else "informatika, komputer, software, sistem informasi, data science, teknologi"
-            relevance_keywords = st.text_input("Kata Kunci Penyaring Tambahan (opsional):", value=default_kw_val, help="Contoh: informatika, komputer, teknologi")
+            relevance_keywords = st.text_input(
+                "Kata Kunci Penyaring Tambahan (opsional):", 
+                key="relevance_keywords", 
+                help="Contoh: informatika, komputer, teknologi"
+            )
     else:
         filter_relevance = False
         relevance_keywords = ""
@@ -1267,9 +1287,9 @@ with tab1:
             if source_option == "Ambil Otomatis dari Portal SINTA":
                 status_container = st.status("Menghubungkan ke Portal SINTA...")
                 
-                s_rank_val = rank_map[sinta_rank]
-                s_area_val = area_map[subject_area]
-                q_val = sinta_search_query.strip() if sinta_search_query else ""
+                s_rank_val = rank_map[st.session_state.get("sinta_rank", "Sinta 4")]
+                s_area_val = area_map[st.session_state.get("subject_area", "Semua Bidang Keilmuan")]
+                q_val = st.session_state.get("sinta_query_search", "").strip()
                 
                 try:
                     status_container.write(f"Mengambil daftar jurnal dari SINTA ({pages_to_scrape} halaman paralel)...")
@@ -1322,13 +1342,15 @@ with tab1:
                     scrape_res = item["result"]
                     
                     # Relevance Filtering Check
-                    if filter_relevance:
-                        kws = [k.strip().lower() for k in relevance_keywords.split(',') if k.strip()]
-                        combined_text = f"{final_name} {scrape_res['scope']} {scrape_res['keywords']} {j_pub} {scrape_res['title']}".lower()
-                        match_found = any(kw in combined_text for kw in kws)
-                        if not match_found:
-                            status_container.write(f"ℹ️ Dilewati (tidak relevan topik): {final_name}")
-                            continue
+                    if st.session_state.get("filter_relevance", False):
+                        kw_input = st.session_state.get("relevance_keywords", "")
+                        kws = [k.strip().lower() for k in kw_input.split(',') if k.strip()]
+                        if kws:
+                            combined_text = f"{final_name} {scrape_res['scope']} {scrape_res['keywords']} {j_pub} {scrape_res['title']}".lower()
+                            match_found = any(kw in combined_text for kw in kws)
+                            if not match_found:
+                                status_container.write(f"ℹ️ Dilewati (tidak relevan topik): {final_name}")
+                                continue
                         
                     results.append({
                         "Pilih": True,
@@ -1623,4 +1645,4 @@ Hormat saya,
                     except Exception as smtp_err:
                         status_area.empty()
                         st.error(f"❌ **Gagal menyambung ke SMTP server:** {smtp_err}")
-                        st.info("Silakan periksa kembali apakah email pengirim dan App Password sudah benar, dan apakah koneksi internet Anda stabil.")
+                        st.info("Silakan periksa kembali meksan email pengirim dan App Password sudah benar, dan apakah koneksi internet Anda stabil.")
