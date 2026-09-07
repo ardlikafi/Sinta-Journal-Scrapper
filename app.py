@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-SintaJournal-Scraper & Mailer
+SintaJournal-Scraper & Mailer (HIGH PERFORMANCE MULTITHREADED VERSION)
 A Streamlit web application to scrape Sinta journals, extract contacts, APC submission fees, and send mass emails using SMTP Gmail.
 
 Cara Menjalankan:
 1. Pastikan library terinstall:
-   pip install requests beautifulsoup4 streamlit python-dotenv pandas
+   pip install requests beautifulsoup4 streamlit python-dotenv pandas lxml
 2. Jalankan Streamlit:
    streamlit run app.py
 """
@@ -24,6 +24,8 @@ import time
 import os
 import urllib.parse
 from dotenv import load_dotenv, set_key
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Disable SSL verification warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -163,24 +165,130 @@ def decode_cloudflare_email(cf_hex):
     except Exception:
         return ""
 
-# Helper function to parse emails from HTML text and decode Cloudflare format
-def extract_emails(html_text):
+# ============================================================================
+# OPTIMIZATION: Pre-compiled Regex Patterns (High Performance & Accuracy)
+# ============================================================================
+REGEX_PATTERNS = {
+    'email': re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
+    'cloudflare_email': re.compile(r'data-cfemail="([a-f0-9]+)"'),
+    'tel_link': re.compile(r'^tel:'),
+    'wa_link': re.compile(r'wa\.me|whatsapp\.com|send\?phone', re.I),
+    'wa_phone': re.compile(r'(?:wa\.me/|phone=|send\?phone=)(\+?[0-9]+)'),
+    'phone_id': re.compile(r'(?:\+62|62|0)8[1-9][0-9\-\s]{7,11}'),
+    'tel_text': re.compile(r'(?:telp|phone|telepon|hp|kontak|contact)[\s\:\-\+]*(\(?[0-9]{2,4}\)?[\s\-]*[0-9]{5,10})'),
+    'article_view': re.compile(r'/article/view/(\d+)', re.I),
+    'article_summary': re.compile(r'article[-_]summary|obj[-_]article[-_]summary', re.I),
+    'toc_article': re.compile(r'tocArticle|tocTitle', re.I),
+    'issue_title': re.compile(r'issue[-_]title|current[-_]issue|page[-_]title', re.I),
+    'author_fees': re.compile(r'authorFees|fee|biaya|apc', re.I),
+    'fee_pattern': re.compile(r'(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+(?:\,\d{2})?|(?:free of charge|tidak dipungut biaya|tanpa biaya|no publication fee|no article processing charge|gratis|0\s?(?:idr|usd|rp)|rp\.?\s?0)', re.I),
+    'fee_context': re.compile(r'(?:biaya|fee|apc|publikasi|penulisan|submission)[^\.\n]{0,80}(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+(?:\,\d{2})?|(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+(?:\,\d{2})?[^\.\n]{0,80}(?:biaya|fee|publikasi|artikel|page)', re.I),
+    'free_fee': re.compile(r'(?:free of charge|tidak dipungut biaya|tanpa biaya|no publication fee|no article processing charge|0\s?(?:idr|usd|rp)|rp\.?\s?0|gratis)', re.I),
+    'page_param': re.compile(r'page=(\d+)'),
+}
+
+# ============================================================================
+# OPTIMIZATION: Thread-safe Session Manager with Connection Pooling
+# ============================================================================
+class SessionManager:
+    """Thread-safe session manager with connection pooling for concurrent requests."""
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._session = None
+                    cls._instance._session_lock = threading.Lock()
+        return cls._instance
+    
+    def get_session(self):
+        """Get or create a requests session with connection pooling."""
+        if self._session is None:
+            with self._session_lock:
+                if self._session is None:
+                    self._session = requests.Session()
+                    adapter = requests.adapters.HTTPAdapter(
+                        pool_connections=30,
+                        pool_maxsize=30,
+                        max_retries=2
+                    )
+                    self._session.mount('http://', adapter)
+                    self._session.mount('https://', adapter)
+        return self._session
+    
+    def close(self):
+        """Close the session."""
+        if self._session:
+            with self._session_lock:
+                if self._session:
+                    self._session.close()
+                    self._session = None
+
+session_manager = SessionManager()
+
+# ============================================================================
+# OPTIMIZATION: Thread-safe URL Cache
+# ============================================================================
+_url_cache = {}
+_cache_lock = threading.Lock()
+
+def get_cached_url(url):
+    """Check if URL content is cached."""
+    with _cache_lock:
+        return _url_cache.get(url)
+
+def set_cached_url(url, content):
+    """Cache URL content with LRU eviction."""
+    with _cache_lock:
+        if len(_url_cache) > 1000:
+            keys_to_remove = list(_url_cache.keys())[:200]
+            for k in keys_to_remove:
+                del _url_cache[k]
+        _url_cache[url] = content
+
+# Helper function to parse emails (standard, mailto, Cloudflare, & obfuscated)
+def extract_emails(html_text, soup=None):
     valid_emails = set()
+    html_text_decoded = html.unescape(html_text)
     
     # 1. Decode Cloudflare emails
-    cf_matches = re.findall(r'data-cfemail="([a-f0-9]+)"', html_text)
+    cf_matches = REGEX_PATTERNS['cloudflare_email'].findall(html_text_decoded)
     for cf_hex in cf_matches:
         decoded = decode_cloudflare_email(cf_hex)
         if decoded and '@' in decoded:
-            valid_emails.add(decoded.lower())
+            valid_emails.add(decoded.lower().strip())
             
-    # 2. Extract standard emails from text
-    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-    raw_emails = re.findall(email_pattern, html_text)
+    # 2. Extract mailto: links from soup if available
+    if soup:
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if href.lower().startswith('mailto:'):
+                clean_e = href.split('mailto:')[1].split('?')[0].strip()
+                if '@' in clean_e:
+                    valid_emails.add(clean_e.lower())
+                    
+    # 3. Extract standard emails from text
+    raw_emails = REGEX_PATTERNS['email'].findall(html_text_decoded)
     for email in raw_emails:
-        if not email.endswith(('.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.svg', '.webp', '.pdf', '.docx')):
-            valid_emails.add(email.lower())
+        email_clean = email.strip().rstrip('.')
+        if not email_clean.endswith(('.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.svg', '.webp', '.pdf', '.docx', '.zip', '.rar')):
+            valid_emails.add(email_clean.lower())
             
+    # 4. Extract obfuscated emails (e.g. name [at] domain [dot] com)
+    obfuscated_pattern = re.compile(
+        r'([a-zA-Z0-9._%+-]+)\s*(?:\[|\(|\s)*\s*(?:at|@)\s*(?:\]|\)|\s)*\s*([a-zA-Z0-9.-]+)\s*(?:\[|\(|\s)*\s*(?:dot|\.)\s*(?:\]|\)|\s)*\s*([a-zA-Z]{2,5})',
+        re.I
+    )
+    for m in obfuscated_pattern.finditer(html_text_decoded):
+        u, d, t = m.groups()
+        if u and d and t and u.lower() not in ['info', 'contact'] and len(t) <= 5:
+            reconstructed = f"{u}@{d}.{t}".lower()
+            if not reconstructed.endswith(('.png', '.jpg', '.jpeg', '.gif', '.css', '.js', '.svg')):
+                valid_emails.add(reconstructed)
+
     return list(valid_emails)
 
 # Helper function to extract other contacts (Phone & WhatsApp)
@@ -188,7 +296,7 @@ def extract_other_contacts(html_text, soup):
     contacts = set()
     
     # 1. Look for tel: links
-    tel_links = soup.find_all('a', href=re.compile(r'^tel:'))
+    tel_links = soup.find_all('a', href=REGEX_PATTERNS['tel_link'])
     for link in tel_links:
         num = link.get('href').replace('tel:', '').strip()
         num = re.sub(r'[\s\-]', '', num)
@@ -196,10 +304,10 @@ def extract_other_contacts(html_text, soup):
             contacts.add(f"Telp: {num}")
             
     # 2. Look for WhatsApp links (wa.me or api.whatsapp.com)
-    wa_links = soup.find_all('a', href=re.compile(r'wa\.me|whatsapp\.com|send\?phone', re.I))
+    wa_links = soup.find_all('a', href=REGEX_PATTERNS['wa_link'])
     for link in wa_links:
         href = link.get('href')
-        match = re.search(r'(?:wa\.me/|phone=|send\?phone=)(\+?[0-9]+)', href)
+        match = REGEX_PATTERNS['wa_phone'].search(href)
         if match:
             num = match.group(1)
             contacts.add(f"WA: {num}")
@@ -208,8 +316,7 @@ def extract_other_contacts(html_text, soup):
             
     # 3. Look for phone number patterns in page text
     text_content = soup.get_text()
-    phone_pattern = r'(?:\+62|62|0)8[1-9][0-9\-\s]{7,11}'
-    found_nums = re.findall(phone_pattern, text_content)
+    found_nums = REGEX_PATTERNS['phone_id'].findall(text_content)
     
     for num in found_nums:
         clean_num = re.sub(r'[\s\-]', '', num)
@@ -220,8 +327,7 @@ def extract_other_contacts(html_text, soup):
                 contacts.add(f"Tel: {clean_num}")
                 
     # 4. Search in text for telephone labels
-    tel_text_pattern = r'(?:telp|phone|telepon|hp|kontak|contact)[\s\:\-\+]*(\(?[0-9]{2,4}\)?[\s\-]*[0-9]{5,10})'
-    text_matches = re.findall(tel_text_pattern, text_content.lower())
+    text_matches = REGEX_PATTERNS['tel_text'].findall(text_content.lower())
     for val in text_matches:
         clean_val = re.sub(r'[\s\-]', '', val)
         if len(clean_val) >= 6:
@@ -272,7 +378,7 @@ def extract_scope(soup, text_content):
     return "Skope / Bidang fokus tidak terdeteksi otomatis."
 
 # Helper to extract Publication / Submission Fee (APC)
-def extract_fee(soup, html_text, journal_url, headers):
+def extract_fee(soup, html_text, journal_url, headers, session=None):
     fee_keywords = [
         "author fee", "author fees", "biaya penulisan", "biaya publikasi", 
         "publication fee", "submission fee", "article processing charge", 
@@ -281,11 +387,11 @@ def extract_fee(soup, html_text, journal_url, headers):
     
     # 1. Search in main page elements
     for kw in fee_keywords:
-        elements = soup.find_all(lambda tag: tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'td', 'li'] and tag.text and kw in tag.text.lower())
+        elements = soup.find_all(lambda tag: tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'td', 'li', 'dt'] and tag.text and kw in tag.text.lower())
         for el in elements:
-            parent = el.parent if el.name in ['h1','h2','h3','h4','h5','h6'] else el
+            parent = el.parent if el.name in ['h1','h2','h3','h4','h5','h6','dt'] else el
             txt = parent.get_text().strip()
-            match = re.search(r'(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+|(?:free of charge|tidak dipungut biaya|tanpa biaya|no publication fee|gratis|0\s?(?:idr|usd|rp)|rp\.?\s?0)', txt, re.I)
+            match = REGEX_PATTERNS['fee_pattern'].search(txt)
             if match:
                 clean_txt = re.sub(r'\s+', ' ', txt)
                 if len(clean_txt) > 150:
@@ -293,15 +399,15 @@ def extract_fee(soup, html_text, journal_url, headers):
                 return clean_txt
 
     # 2. Pattern matching in main raw text
-    fee_match = re.search(r'(?:biaya|fee|apc|publikasi|penulisan|submission)[^\.\n]{0,60}(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+|(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+[^\.\n]{0,60}(?:biaya|fee|publikasi|artikel|page)', html_text, re.I)
+    fee_match = REGEX_PATTERNS['fee_context'].search(html_text)
     if fee_match:
         clean_match = re.sub(r'\s+', ' ', fee_match.group(0)).strip()
         if len(clean_match) > 120:
             clean_match = clean_match[:117] + "..."
         return clean_match
 
-    free_match = re.search(r'(?:free of charge|tidak dipungut biaya|tanpa biaya|no publication fee|0\s?(?:idr|usd|rp)|rp\.?\s?0)', html_text, re.I)
-    if free_match:
+    # Check for free fee indication
+    if REGEX_PATTERNS['free_fee'].search(html_text):
         return "Gratis / Free"
 
     # 3. Check fee subpages
@@ -320,7 +426,7 @@ def extract_fee(soup, html_text, journal_url, headers):
     for a in soup.find_all('a', href=True):
         href = a['href']
         href_lower = href.lower()
-        if any(k in href_lower for k in ['fee', 'author', 'submission', 'biaya', 'charge']):
+        if any(k in href_lower for k in ['fee', 'author', 'submission', 'biaya', 'charge', 'apc']):
             if not href.startswith(('http://', 'https://')):
                 from urllib.parse import urljoin
                 href = urljoin(journal_url, href)
@@ -329,33 +435,42 @@ def extract_fee(soup, html_text, journal_url, headers):
     seen_fee_urls = set()
     unique_fee_urls = [x for x in fee_urls if not (x in seen_fee_urls or seen_fee_urls.add(x))]
     
+    req_session = session if session else session_manager.get_session()
+    
     for f_url in unique_fee_urls[:2]:
-        try:
-            f_res = requests.get(f_url, headers=headers, timeout=6, verify=False)
-            if f_res.status_code == 200:
-                f_html = html.unescape(f_res.text)
-                f_soup = BeautifulSoup(f_html, 'html.parser')
-                f_text = f_soup.get_text()
+        cached = get_cached_url(f_url)
+        if cached:
+            f_html, f_soup, f_text = cached
+        else:
+            try:
+                f_res = req_session.get(f_url, headers=headers, timeout=5, verify=False)
+                if f_res.status_code == 200:
+                    f_html = html.unescape(f_res.text)
+                    f_soup = BeautifulSoup(f_html, 'lxml')
+                    f_text = f_soup.get_text()
+                    set_cached_url(f_url, (f_html, f_soup, f_text))
+                else:
+                    continue
+            except Exception:
+                continue
                 
-                fee_elem = f_soup.find(id=re.compile(r'authorFees|fee|biaya', re.I)) or f_soup.find(class_=re.compile(r'authorFees|fee|biaya', re.I))
-                if fee_elem:
-                    t = re.sub(r'\s+', ' ', fee_elem.get_text()).strip()
-                    if len(t) > 10:
-                        if len(t) > 150:
-                            t = t[:147] + "..."
-                        return t
-                
-                m = re.search(r'(?:biaya|fee|apc|publikasi|penulisan|submission)[^\.\n]{0,60}(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+|(?:Rp\.?|IDR|\$|USD)\s?[\d\.\,]+[^\.\n]{0,60}(?:biaya|fee|publikasi|artikel|page)', f_text, re.I)
-                if m:
-                    clean_m = re.sub(r'\s+', ' ', m.group(0)).strip()
-                    if len(clean_m) > 120:
-                        clean_m = clean_m[:117] + "..."
-                    return clean_m
-                    
-                if any(k in f_text.lower() for k in ['free of charge', 'tidak dipungut biaya', 'tanpa biaya', 'no publication fee']):
-                    return "Gratis / Free"
-        except Exception:
-            continue
+        fee_elem = f_soup.find(id=REGEX_PATTERNS['author_fees']) or f_soup.find(class_=REGEX_PATTERNS['author_fees'])
+        if fee_elem:
+            t = re.sub(r'\s+', ' ', fee_elem.get_text()).strip()
+            if len(t) > 10:
+                if len(t) > 150:
+                    t = t[:147] + "..."
+                return t
+        
+        m = REGEX_PATTERNS['fee_context'].search(f_text)
+        if m:
+            clean_m = re.sub(r'\s+', ' ', m.group(0)).strip()
+            if len(clean_m) > 120:
+                clean_m = clean_m[:117] + "..."
+            return clean_m
+            
+        if REGEX_PATTERNS['free_fee'].search(f_text):
+            return "Gratis / Free"
 
     return "Tidak terdeteksi (Bisa diisi manual)"
 
@@ -396,7 +511,7 @@ def search_keywords(text_content):
     return ", ".join(result_tags) if result_tags else "Tidak ditemukan kata kunci spesifik"
 
 # Helper to count articles and extract current issue title from OJS
-def count_articles_in_current_issue(journal_url, headers):
+def count_articles_in_current_issue(journal_url, headers, session=None):
     journal_url = journal_url.strip()
     if not journal_url.startswith(("http://", "https://")):
         journal_url = "https://" + journal_url
@@ -419,152 +534,175 @@ def count_articles_in_current_issue(journal_url, headers):
     seen = set()
     current_issue_urls = [x for x in current_issue_urls if not (x in seen or seen.add(x))]
     
+    req_session = session if session else session_manager.get_session()
+    
     for url in current_issue_urls:
-        try:
-            res = requests.get(url, headers=headers, timeout=8, verify=False)
-            if res.status_code == 200:
-                html_content = html.unescape(res.text)
-                soup = BeautifulSoup(html_content, 'html.parser')
-                
-                articles_count = 0
-                articles = soup.find_all(class_=re.compile(r'article[-_]summary|obj[-_]article[-_]summary', re.I))
-                if articles:
-                    articles_count = len(articles)
+        cached = get_cached_url(url)
+        if cached:
+            soup = cached
+        else:
+            try:
+                res = req_session.get(url, headers=headers, timeout=5, verify=False)
+                if res.status_code == 200:
+                    html_content = html.unescape(res.text)
+                    soup = BeautifulSoup(html_content, 'lxml')
+                    set_cached_url(url, soup)
                 else:
-                    toc_articles = soup.find_all(class_=re.compile(r'tocArticle|tocTitle', re.I))
-                    if toc_articles:
-                        articles_count = len(toc_articles)
-                    else:
-                        article_links = soup.find_all('a', href=re.compile(r'/article/view/\d+', re.I))
-                        unique_article_hrefs = set(link.get('href') for link in article_links)
-                        base_article_hrefs = set()
-                        for href in unique_article_hrefs:
-                            match = re.search(r'/article/view/(\d+)', href, re.I)
-                            if match:
-                                base_article_hrefs.add(match.group(1))
-                        if base_article_hrefs:
-                            articles_count = len(base_article_hrefs)
+                    continue
+            except Exception:
+                continue
                 
-                if articles_count > 0:
-                    issue_title = ""
-                    title_elem = soup.find(class_=re.compile(r'issue[-_]title|current[-_]issue|page[-_]title', re.I))
-                    if not title_elem:
-                        title_elem = soup.find(['h1', 'h2', 'h3'])
-                    if title_elem:
-                        issue_title = title_elem.text.strip()
-                        issue_title = re.sub(r'\s+', ' ', issue_title)
-                        if len(issue_title) > 60:
-                            issue_title = issue_title[:57] + "..."
-                            
-                    return {
-                        "count": articles_count,
-                        "issue_info": issue_title if issue_title else "Terbitan Terakhir"
-                    }
-        except Exception:
-            continue
+        articles_count = 0
+        articles = soup.find_all(class_=REGEX_PATTERNS['article_summary'])
+        if articles:
+            articles_count = len(articles)
+        else:
+            toc_articles = soup.find_all(class_=REGEX_PATTERNS['toc_article'])
+            if toc_articles:
+                articles_count = len(toc_articles)
+            else:
+                article_links = soup.find_all('a', href=REGEX_PATTERNS['article_view'])
+                unique_article_hrefs = set(link.get('href') for link in article_links)
+                base_article_hrefs = set()
+                for href in unique_article_hrefs:
+                    match = REGEX_PATTERNS['article_view'].search(href)
+                    if match:
+                        base_article_hrefs.add(match.group(1))
+                if base_article_hrefs:
+                    articles_count = len(base_article_hrefs)
+        
+        if articles_count > 0:
+            issue_title = ""
+            title_elem = soup.find(class_=REGEX_PATTERNS['issue_title'])
+            if not title_elem:
+                title_elem = soup.find(['h1', 'h2', 'h3'])
+            if title_elem:
+                issue_title = title_elem.text.strip()
+                issue_title = re.sub(r'\s+', ' ', issue_title)
+                if len(issue_title) > 60:
+                    issue_title = issue_title[:57] + "..."
+                    
+            return {
+                "count": articles_count,
+                "issue_info": issue_title if issue_title else "Terbitan Terakhir"
+            }
             
     return {
         "count": 0,
         "issue_info": "Tidak terdeteksi"
     }
 
-# Helper function to scrape a single journal URL
-def scrape_journal_website(journal_url, headers):
+# Helper function to scrape a single journal URL with Early Exit optimization
+def scrape_journal_website(journal_url, headers, session=None):
     journal_url = journal_url.strip()
     if not journal_url.startswith(("http://", "https://")):
         journal_url = "https://" + journal_url
         
+    req_session = session if session else session_manager.get_session()
+    
     try:
-        res = requests.get(journal_url, headers=headers, timeout=12, verify=False)
+        res = req_session.get(journal_url, headers=headers, timeout=8, verify=False)
         html_content = html.unescape(res.text)
-        soup = BeautifulSoup(html_content, 'html.parser')
+        soup = BeautifulSoup(html_content, 'lxml')
         
         title = soup.title.string.strip() if soup.title else "No Title"
-        emails = extract_emails(html_content)
+        emails = extract_emails(html_content, soup)
         other_contacts = extract_other_contacts(html_content, soup)
         text_content = soup.get_text()
         keywords_summary = search_keywords(text_content)
         scope_summary = extract_scope(soup, text_content)
-        fee_summary = extract_fee(soup, html_content, journal_url, headers)
+        fee_summary = extract_fee(soup, html_content, journal_url, headers, req_session)
         
-        base_url = journal_url.rstrip('/')
-        contact_urls = [
-            f"{base_url}/about/contact",
-            f"{base_url}/about",
-            f"{base_url}/contact",
-            f"{base_url}/about/editorialPolicies",
-        ]
+        # Early Exit check: if email & fee are already complete from homepage, skip extra subpages!
+        has_good_email = len(emails) > 0
+        has_good_fee = fee_summary and "tidak terdeteksi" not in fee_summary.lower()
         
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            href_lower = href.lower()
-            if 'contact' in href_lower or 'about' in href_lower:
-                if not href.startswith(('http://', 'https://')):
-                    from urllib.parse import urljoin
-                    href = urljoin(journal_url, href)
-                contact_urls.append(href)
-                
-        if "index.php" not in base_url.lower():
-            contact_urls.extend([
-                f"{base_url}/index.php/about/contact",
-                f"{base_url}/index.php/contact",
-                f"{base_url}/index.php/about",
-                f"{base_url}/index.php/about/editorialPolicies"
-            ])
+        if not (has_good_email and has_good_fee):
+            base_url = journal_url.rstrip('/')
+            contact_urls = [
+                f"{base_url}/about/contact",
+                f"{base_url}/about",
+                f"{base_url}/contact",
+                f"{base_url}/about/editorialPolicies",
+            ]
             
-        seen_urls = set()
-        unique_urls = [x for x in contact_urls if not (x in seen_urls or seen_urls.add(x))]
-        
-        contact_priority = []
-        about_priority = []
-        other_priority = []
-        for url in unique_urls:
-            url_lower = url.lower()
-            if 'contact' in url_lower:
-                contact_priority.append(url)
-            elif 'about' in url_lower:
-                about_priority.append(url)
-            else:
-                other_priority.append(url)
-                
-        sorted_contact_urls = contact_priority + about_priority + other_priority
-        target_urls = sorted_contact_urls[:3]
-        
-        for c_url in target_urls:
-            try:
-                c_res = requests.get(c_url, headers=headers, timeout=8, verify=False)
-                if c_res.status_code == 200:
-                    c_html = html.unescape(c_res.text)
-                    c_soup = BeautifulSoup(c_html, 'html.parser')
-                    c_text = c_soup.get_text()
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                href_lower = href.lower()
+                if 'contact' in href_lower or 'about' in href_lower:
+                    if not href.startswith(('http://', 'https://')):
+                        from urllib.parse import urljoin
+                        href = urljoin(journal_url, href)
+                    contact_urls.append(href)
                     
-                    c_emails = extract_emails(c_html)
-                    if c_emails:
-                        emails.extend(c_emails)
-                        
-                    c_other = extract_other_contacts(c_html, c_soup)
-                    if c_other:
-                        if other_contacts:
-                            combined = set(other_contacts.split("; ") + c_other.split("; "))
-                            other_contacts = "; ".join(list(combined))
-                        else:
-                            other_contacts = c_other
-                            
-                    if "tidak terdeteksi" in scope_summary.lower():
-                        c_scope = extract_scope(c_soup, c_text)
-                        if "tidak terdeteksi" not in c_scope.lower():
-                            scope_summary = c_scope
-                            
-                    k_sum = search_keywords(c_text)
-                    if k_sum != "Tidak ditemukan kata kunci spesifik" and keywords_summary == "Tidak ditemukan kata kunci spesifik":
-                        keywords_summary = k_sum
-            except Exception:
-                continue
+            if "index.php" not in base_url.lower():
+                contact_urls.extend([
+                    f"{base_url}/index.php/about/contact",
+                    f"{base_url}/index.php/contact",
+                    f"{base_url}/index.php/about",
+                    f"{base_url}/index.php/about/editorialPolicies"
+                ])
                 
+            seen_urls = set()
+            unique_urls = [x for x in contact_urls if not (x in seen_urls or seen_urls.add(x))]
+            
+            contact_priority = []
+            about_priority = []
+            other_priority = []
+            for url in unique_urls:
+                url_lower = url.lower()
+                if 'contact' in url_lower:
+                    contact_priority.append(url)
+                elif 'about' in url_lower:
+                    about_priority.append(url)
+                else:
+                    other_priority.append(url)
+                    
+            sorted_contact_urls = contact_priority + about_priority + other_priority
+            target_urls = sorted_contact_urls[:2]
+            
+            for c_url in target_urls:
+                cached = get_cached_url(c_url)
+                if cached:
+                    c_soup, c_text, c_html = cached
+                else:
+                    try:
+                        c_res = req_session.get(c_url, headers=headers, timeout=5, verify=False)
+                        if c_res.status_code == 200:
+                            c_html = html.unescape(c_res.text)
+                            c_soup = BeautifulSoup(c_html, 'lxml')
+                            c_text = c_soup.get_text()
+                            set_cached_url(c_url, (c_soup, c_text, c_html))
+                        else:
+                            continue
+                    except Exception:
+                        continue
+                        
+                c_emails = extract_emails(c_html, c_soup)
+                if c_emails:
+                    emails.extend(c_emails)
+                    
+                c_other = extract_other_contacts(c_html, c_soup)
+                if c_other:
+                    if other_contacts:
+                        combined = set(other_contacts.split("; ") + c_other.split("; "))
+                        other_contacts = "; ".join(list(combined))
+                    else:
+                        other_contacts = c_other
+                        
+                if "tidak terdeteksi" in scope_summary.lower():
+                    c_scope = extract_scope(c_soup, c_text)
+                    if "tidak terdeteksi" not in c_scope.lower():
+                        scope_summary = c_scope
+                        
+                k_sum = search_keywords(c_text)
+                if k_sum != "Tidak ditemukan kata kunci spesifik" and keywords_summary == "Tidak ditemukan kata kunci spesifik":
+                    keywords_summary = k_sum
+                    
         emails = list(set(emails))
         email_str = ", ".join(emails) if emails else ""
         
-        issue_data = count_articles_in_current_issue(journal_url, headers)
+        issue_data = count_articles_in_current_issue(journal_url, headers, req_session)
         if issue_data["count"] > 0:
             last_issue_str = f"{issue_data['count']} Artikel ({issue_data['issue_info']})"
         else:
@@ -593,25 +731,116 @@ def scrape_journal_website(journal_url, headers):
             "last_issue": "Koneksi Gagal"
         }
 
-# Helper to find maximum page count dynamically on Sinta list
-def get_max_sinta_pages(soup):
-    max_page = 1
-    pagination_div = soup.find('div', class_='pagination') or soup.find('ul', class_='pagination')
-    if pagination_div:
-        links = pagination_div.find_all('a')
-        for link in links:
-            href = link.get('href') or ""
-            match = re.search(r'page=(\d+)', href)
-            if match:
-                page_num = int(match.group(1))
-                if page_num > max_page:
-                    max_page = page_num
-            text = link.text.strip()
-            if text.isdigit():
-                page_num = int(text)
-                if page_num > max_page:
-                    max_page = page_num
-    return max_page
+# ============================================================================
+# OPTIMIZATION: Concurrent Scraping Function with ThreadPoolExecutor
+# ============================================================================
+def scrape_journals_concurrent(journal_targets, headers, max_workers=10, progress_callback=None):
+    """
+    Scrape multiple journals concurrently using ThreadPoolExecutor.
+    """
+    results = []
+    total = len(journal_targets)
+    session = session_manager.get_session()
+    
+    def scrape_single(args):
+        idx, target = args
+        j_name = target["name"]
+        j_url = target["url"]
+        j_pub = target["publisher"]
+        
+        result = scrape_journal_website(j_url, headers, session)
+        
+        final_name = j_name
+        if j_name == "Jurnal Input Manual" and result["status"] == "Sukses":
+            final_name = result["title"].split('|')[0].split('-')[0].strip()
+        
+        return {
+            "idx": idx,
+            "result": result,
+            "final_name": final_name,
+            "j_url": j_url,
+            "j_pub": j_pub
+        }
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(scrape_single, (idx, target)): idx 
+            for idx, target in enumerate(journal_targets)
+        }
+        
+        completed = 0
+        for future in as_completed(future_to_idx):
+            try:
+                data = future.result()
+                completed += 1
+                
+                if progress_callback:
+                    progress_callback(completed, total, data["j_url"], data["result"])
+                
+                results.append({
+                    "idx": data["idx"],
+                    "result": data["result"],
+                    "final_name": data["final_name"],
+                    "j_url": data["j_url"],
+                    "j_pub": data["j_pub"]
+                })
+            except Exception as e:
+                completed += 1
+                idx = future_to_idx[future]
+                target = journal_targets[idx]
+                if progress_callback:
+                    progress_callback(completed, total, target["url"], {"status": f"Error: {str(e)}"})
+    
+    results.sort(key=lambda x: x["idx"])
+    return results
+
+# Helper to fetch SINTA list page concurrently
+def fetch_sinta_page(args):
+    page, s_rank_val, s_area_val, q_val, headers = args
+    url_get = f"https://sinta.kemdiktisaintek.go.id/journals/index/?sinta={s_rank_val}&page={page}"
+    if s_area_val != "all":
+        url_get += f"&area={s_area_val}"
+    if q_val:
+        url_get += f"&q={urllib.parse.quote(q_val)}"
+        
+    session = session_manager.get_session()
+    targets = []
+    try:
+        get_res = session.get(url_get, headers=headers, timeout=15)
+        if get_res.status_code == 200:
+            soup = BeautifulSoup(get_res.text, 'html.parser')
+            journal_divs = soup.find_all('div', class_='affil-name')
+            
+            for div in journal_divs:
+                a_tag = div.find('a')
+                if a_tag:
+                    j_name = a_tag.text.strip()
+                    parent = div.find_parent('div', class_='ar-list-item') or div.parent.parent
+                    
+                    website_url = ""
+                    publisher_name = ""
+                    if parent:
+                        abbrev_div = parent.find('div', class_='affil-abbrev')
+                        if abbrev_div:
+                            links = abbrev_div.find_all('a')
+                            for link in links:
+                                txt = link.text.strip().lower()
+                                if 'website' in txt:
+                                    website_url = link.get('href')
+                                    break
+                        loc_div = parent.find('div', class_='affil-loc')
+                        if loc_div:
+                            publisher_name = loc_div.text.strip()
+                                    
+                    if website_url:
+                        targets.append({
+                            "name": j_name,
+                            "url": website_url,
+                            "publisher": publisher_name
+                        })
+    except Exception:
+        pass
+    return page, targets
 
 # Main Header
 st.markdown("""
@@ -653,6 +882,16 @@ except Exception:
     pass
 
 st.sidebar.caption("🟢 Kredensial & identitas disimpan otomatis.")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ⚡ Performa Scraping (Multithreading)")
+max_workers = st.sidebar.slider(
+    "Jumlah Thread Concurrent:",
+    min_value=2,
+    max_value=30,
+    value=10,
+    help="Jumlah website jurnal yang di-scrape secara paralel. Nilai 10 - 20 direkomendasikan untuk koneksi cepat."
+)
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("❓ Cara Mendapatkan App Password Gmail"):
@@ -793,7 +1032,6 @@ with tab1:
                 uploaded_df = pd.read_csv(uploaded_file)
                 
                 required_cols = ["Nama Jurnal", "Website URL", "Email Tujuan", "Kontak Lain (WA/Telp)", "Biaya Submit / APC", "Scope Jurnal"]
-                # Fallback check if old format without Biaya Submit
                 if "Biaya Submit / APC" not in uploaded_df.columns:
                     uploaded_df["Biaya Submit / APC"] = "Belum Diisi"
 
@@ -818,8 +1056,8 @@ with tab1:
             st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
             st.info(f"📊 File CSV terunggah berisi **{total_rows} jurnal**.")
             
-            if st.button("🔄 Sinkronisasi & Validasi Ulang Semua Kontak & Biaya (Re-Scrape & Gabung)", help="Menelusuri ulang seluruh website jurnal di CSV dan menggabungkan kontak & biaya baru."):
-                status_container = st.status("Memulai re-scrape dan penggabungan seluruh data kontak & biaya...")
+            if st.button("🔄 Sinkronisasi & Validasi Ulang Semua Kontak & Biaya (Re-Scrape & Gabung)", help="Menelusuri ulang seluruh website jurnal di CSV secara paralel dan menggabungkan kontak & biaya baru."):
+                status_container = st.status(f"Memulai re-scrape paralel ({max_workers} thread)...")
                 progress_bar = st.progress(0)
                 
                 updated_df = df.copy()
@@ -863,14 +1101,28 @@ with tab1:
                     s = str(val).strip().lower()
                     return s == "" or s == "nan" or s == "tidak terdeteksi" or "koneksi gagal" in s or "belum diisi" in s or "tidak terdeteksi (bisa diisi manual)" in s
 
+                csv_targets = []
                 for idx in range(total_rows):
                     row = updated_df.iloc[idx]
-                    j_url = row["Website URL"]
-                    
-                    status_container.write(f"Validasi Ulang [{idx+1}/{total_rows}]: {j_url}...")
-                    
-                    scrape_res = scrape_journal_website(j_url, headers)
-                    
+                    csv_targets.append({
+                        "name": row.get("Nama Jurnal", "Jurnal CSV"),
+                        "url": row["Website URL"],
+                        "publisher": row.get("Institusi Penerbit", "")
+                    })
+
+                def rescrape_progress(completed, total_items, current_url, res):
+                    status_container.write(f"Validasi Ulang [{completed}/{total_items}]: {current_url}...")
+                    progress_bar.progress(completed / total_items)
+
+                rescrape_results = scrape_journals_concurrent(
+                    csv_targets, headers, max_workers=max_workers, progress_callback=rescrape_progress
+                )
+
+                for item in rescrape_results:
+                    idx = item["idx"]
+                    row = updated_df.iloc[idx]
+                    scrape_res = item["result"]
+
                     if scrape_res["status"] == "Sukses":
                         orig_email = row.get("Email Tujuan", "")
                         updated_df.iat[idx, updated_df.columns.get_loc("Email Tujuan")] = merge_emails(orig_email, scrape_res["emails"])
@@ -899,21 +1151,18 @@ with tab1:
                             updated_df.iat[idx, updated_df.columns.get_loc("Judul Web")] = scrape_res["title"]
                     else:
                         updated_df.iat[idx, updated_df.columns.get_loc("Status Scraping")] = scrape_res["status"]
-                        
-                    progress_bar.progress((idx + 1) / total_rows)
-                    time.sleep(0.8)
-                    
+
                 st.session_state.scraped_df = updated_df
                 duration = time.time() - start_time
                 mins, secs = int(duration // 60), int(duration % 60)
                 duration_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
                 
-                status_container.update(state="complete", label=f"Sinkronisasi selesai dalam {duration_str}!")
+                status_container.update(state="complete", label=f"Sinkronisasi paralel selesai dalam {duration_str}!")
                 st.toast("Seluruh data kontak & biaya berhasil disinkronisasi!", icon="✅")
                 time.sleep(1)
                 st.rerun()
 
-    # Keyword relevance filtering options (Optional local keyword filter)
+    # Keyword relevance filtering options
     if source_option != "Upload File CSV Hasil Edit (Excel)":
         st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
         col_rel1, col_rel2 = st.columns([1, 2])
@@ -940,50 +1189,17 @@ with tab1:
                 s_area_val = area_map[subject_area]
                 q_val = sinta_search_query.strip()
                 
-                sinta_session = requests.Session()
-                
                 try:
-                    for page in range(1, pages_to_scrape + 1):
-                        status_container.write(f"Mengambil daftar jurnal dari SINTA - Halaman {page}...")
-                        url_get = f"https://sinta.kemdiktisaintek.go.id/journals/index/?sinta={s_rank_val}&page={page}"
-                        if s_area_val != "all":
-                            url_get += f"&area={s_area_val}"
-                        if q_val:
-                            url_get += f"&q={urllib.parse.quote(q_val)}"
-                            
-                        get_res = sinta_session.get(url_get, headers=headers, timeout=15)
-                        
-                        if get_res.status_code == 200:
-                            soup = BeautifulSoup(get_res.text, 'html.parser')
-                            journal_divs = soup.find_all('div', class_='affil-name')
-                            
-                            for div in journal_divs:
-                                a_tag = div.find('a')
-                                if a_tag:
-                                    j_name = a_tag.text.strip()
-                                    parent = div.find_parent('div', class_='ar-list-item') or div.parent.parent
-                                    
-                                    website_url = ""
-                                    publisher_name = ""
-                                    if parent:
-                                        abbrev_div = parent.find('div', class_='affil-abbrev')
-                                        if abbrev_div:
-                                            links = abbrev_div.find_all('a')
-                                            for link in links:
-                                                txt = link.text.strip().lower()
-                                                if 'website' in txt:
-                                                    website_url = link.get('href')
-                                                    break
-                                        loc_div = parent.find('div', class_='affil-loc')
-                                        if loc_div:
-                                            publisher_name = loc_div.text.strip()
-                                                    
-                                    if website_url:
-                                        journal_targets.append({
-                                            "name": j_name,
-                                            "url": website_url,
-                                            "publisher": publisher_name
-                                        })
+                    status_container.write(f"Mengambil daftar jurnal dari SINTA ({pages_to_scrape} halaman paralel)...")
+                    with ThreadPoolExecutor(max_workers=min(pages_to_scrape, 8)) as page_executor:
+                        futures = [
+                            page_executor.submit(fetch_sinta_page, (page, s_rank_val, s_area_val, q_val, headers))
+                            for page in range(1, pages_to_scrape + 1)
+                        ]
+                        page_results = [f.result() for f in futures]
+                        page_results.sort(key=lambda x: x[0])
+                        for _, targets in page_results:
+                            journal_targets.extend(targets)
                     
                     status_container.write(f"Berhasil menemukan {len(journal_targets)} jurnal dari SINTA.")
                 except Exception as e:
@@ -1000,24 +1216,24 @@ with tab1:
                     })
                     
             if journal_targets:
-                results = []
-                status_container = st.status("Scraping detail isi website jurnal, kontak, & biaya submit...") if 'status_container' not in locals() else status_container
-                
+                status_container = st.status(f"Scraping detail {len(journal_targets)} website jurnal secara paralel ({max_workers} thread)...") if 'status_container' not in locals() else status_container
                 progress_bar = st.progress(0)
                 total = len(journal_targets)
                 
-                for idx, target in enumerate(journal_targets):
-                    j_name = target["name"]
-                    j_url = target["url"]
-                    j_pub = target["publisher"]
-                    
-                    status_container.write(f"Scraping [{idx+1}/{total}]: {j_url}...")
-                    
-                    scrape_res = scrape_journal_website(j_url, headers)
-                    
-                    final_name = j_name
-                    if j_name == "Jurnal Input Manual" and scrape_res["status"] == "Sukses":
-                        final_name = scrape_res["title"].split('|')[0].split('-')[0].strip()
+                def scrape_progress(completed, total_items, current_url, res):
+                    status_container.write(f"Scraping [{completed}/{total_items}]: {current_url}...")
+                    progress_bar.progress(completed / total_items)
+                
+                concurrent_results = scrape_journals_concurrent(
+                    journal_targets, headers, max_workers=max_workers, progress_callback=scrape_progress
+                )
+                
+                results = []
+                for item in concurrent_results:
+                    final_name = item["final_name"]
+                    j_url = item["j_url"]
+                    j_pub = item["j_pub"]
+                    scrape_res = item["result"]
                     
                     if filter_relevance and scrape_res["status"] == "Sukses":
                         kws = [k.strip().lower() for k in relevance_keywords.split(',') if k.strip()]
@@ -1029,7 +1245,6 @@ with tab1:
                                 break
                         if not match_found:
                             status_container.write(f"ℹ️ Dilewati (tidak relevan): {final_name}")
-                            progress_bar.progress((idx + 1) / total)
                             continue
                         
                     results.append({
@@ -1046,8 +1261,6 @@ with tab1:
                         "Status Scraping": scrape_res["status"],
                         "Judul Web": scrape_res["title"]
                     })
-                    
-                    progress_bar.progress((idx + 1) / total)
                     
                 st.session_state.scraped_df = pd.DataFrame(results)
                 end_time = time.time()
